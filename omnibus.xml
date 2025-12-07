@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<extension method="upgrade" type="plugin" group="hikashop">
+    <name>PLG_HIKASHOP_OMNIBUS</name>
+    <version>1.0</version>
+    <description>PLG_HIKASHOP_OMNIBUS_DESCRIPTION</description>
+    <author>Paweł Półtoraczyk</author>
+    <creationDate>07-12-2025</creationDate>
+    <copyright>(C) 2024 Open Source Matters, Inc.</copyright>
+    <license>GNU General Public License version 2 or later</license>
+    <namespace path="src">Pablop76\Plugin\Hikashop\Omnibus</namespace>
+    <files>
+        <folder plugin="omnibus">services</folder>
+        <folder>src</folder>
+        <folder>sql</folder>
+        <folder>language</folder>
+        <folder>media</folder>
+    </files>
+    <install>
+        <sql>
+            <file driver="mysql" charset="utf8">sql/install.mysql.utf8.sql</file>
+        </sql>
+    </install>
+    <uninstall>
+        <sql>
+            <file driver="mysql" charset="utf8">sql/uninstall.mysql.utf8.sql</file>
+        </sql>
+    </uninstall>
+    <languages>
+        <language tag="en-GB">language/en-GB/plg_hikashop_omnibus.ini</language>
+        <language tag="en-GB">language/en-GB/plg_hikashop_omnibus.sys.ini</language>
+        <language tag="pl-PL">language/pl-PL/plg_hikashop_omnibus.ini</language>
+        <language tag="pl-PL">language/pl-PL/plg_hikashop_omnibus.sys.ini</language>
+    </languages>
+    <config>
+        <fields name="params">
+            <fieldset name="basic">
+                <field
+                    name="days_count"
+                    type="number"
+                    label="PLG_HIKASHOP_OMNIBUS_DAYS_COUNT_LABEL"
+                    description="PLG_HIKASHOP_OMNIBUS_DAYS_COUNT_DESC"
+                    default="30"
+                    min="1"
+                    max="365"
+                    step="1"
+                />
+                <field
+                    name="font_size"
+                    type="text"
+                    label="PLG_HIKASHOP_OMNIBUS_FONT_SIZE_LABEL"
+                    description="PLG_HIKASHOP_OMNIBUS_FONT_SIZE_DESC"
+                    default="0.85em"
+                />
+                <field
+                    name="text_color"
+                    type="color"
+                    label="PLG_HIKASHOP_OMNIBUS_TEXT_COLOR_LABEL"
+                    description="PLG_HIKASHOP_OMNIBUS_TEXT_COLOR_DESC"
+                    default="#666666"
+                />
+                <field
+                    name="strikethrough"
+                    type="radio"
+                    label="PLG_HIKASHOP_OMNIBUS_STRIKETHROUGH_LABEL"
+                    description="PLG_HIKASHOP_OMNIBUS_STRIKETHROUGH_DESC"
+                    default="1"
+                    class="btn-group"
+                >
+                    <option value="0">JNO</option>
+                    <option value="1">JYES</option>
+                </field>
+                <field
+                    name="margin_top"
+                    type="text"
+                    label="PLG_HIKASHOP_OMNIBUS_MARGIN_TOP_LABEL"
+                    description="PLG_HIKASHOP_OMNIBUS_MARGIN_TOP_DESC"
+                    default="10px"
+                />
+                <field
+                    name="margin_bottom"
+                    type="text"
+                    label="PLG_HIKASHOP_OMNIBUS_MARGIN_BOTTOM_LABEL"
+                    description="PLG_HIKASHOP_OMNIBUS_MARGIN_BOTTOM_DESC"
+                    default="10px"
+                />
+            </fieldset>
+        </fields>
+    </config>
+</extension>

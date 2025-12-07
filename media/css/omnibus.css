@@ -1,0 +1,21 @@
+/**
+ * Hikashop Omnibus Plugin - Styles
+ * @package   Omnibus
+ * @author    Pablop76
+ * @copyright Copyright (C) 2025
+ * @license   GNU/GPLv3
+ */
+
+.hikashop-omnibus-lowest-price {
+    margin: 10px 0;
+    font-size: 0.85em;
+    color: #666;
+}
+
+.omnibus-price-label {
+    font-weight: normal;
+}
+
+.omnibus-price-value {
+    text-decoration: line-through;
+}
