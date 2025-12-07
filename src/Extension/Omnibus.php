@@ -191,11 +191,8 @@ class Omnibus extends CMSPlugin
             return '';
         }
         
-        // Jeśli jest tylko jeden wpis (z instalacji), nie pokazuj informacji
-        if ($lowestPrice->entries_count <= 1) {
-            return '';
-        }
-        
+        // Pokaż informację zawsze gdy mamy cenę w historii
+        // (rabaty/kupony są stosowane dynamicznie i nie zmieniają ceny bazowej)
         $priceToShow = $lowestPrice->lowest_price;
         
         // Jeśli produkt ma aktualną cenę z podatkiem, użyj współczynnika
