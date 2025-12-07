@@ -191,8 +191,26 @@ class Omnibus extends CMSPlugin
             return '';
         }
         
-        // Pokaż informację zawsze gdy mamy cenę w historii
-        // (rabaty/kupony są stosowane dynamicznie i nie zmieniają ceny bazowej)
+        // KLUCZOWE: Zgodnie z dyrektywą Omnibus informacja ma się pokazywać 
+        // TYLKO przy ogłoszeniu obniżki (rabat, promocja, kupon)
+        
+        // Sprawdź czy produkt ma obecnie rabat aktywny
+        $hasDiscount = false;
+        
+        if (!empty($product->prices)) {
+            $priceObj = reset($product->prices);
+            
+            // HikaShop przechowuje cenę przed rabatem w price_value_without_discount
+            if (isset($priceObj->price_value_without_discount) && $priceObj->price_value_without_discount > $priceObj->price_value) {
+                $hasDiscount = true;
+            }
+        }
+        
+        // Jeśli NIE MA rabatu/promocji, nie pokazuj informacji
+        if (!$hasDiscount) {
+            return '';
+        }
+        
         $priceToShow = $lowestPrice->lowest_price;
         
         // Jeśli produkt ma aktualną cenę z podatkiem, użyj współczynnika
