@@ -42,7 +42,7 @@ Plugin w 100% spełnia wymagania **dyrektywy Omnibus (UE) 2019/2161**:
 
 ## Instalacja
 
-1. Pobierz najnowszą wersję z [Releases](../../releases)
+1. Pobierz najnowszą wersję
 2. Zaloguj się do panelu administracyjnego Joomla
 3. Przejdź do **System → Install → Extensions**
 4. Wybierz pobrany plik ZIP i zainstaluj
