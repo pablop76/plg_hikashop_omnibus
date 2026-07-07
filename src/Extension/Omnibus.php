@@ -8,7 +8,6 @@ use Joomla\CMS\Plugin\CMSPlugin;
 use Joomla\Event\Event;
 use Joomla\CMS\Factory;
 use Joomla\CMS\Language\Text;
-use Joomla\CMS\Uri\Uri;
 
 class Omnibus extends CMSPlugin
 {
@@ -50,53 +49,66 @@ class Omnibus extends CMSPlugin
         if ($element instanceof Event) {
             $element = $element->getArgument(0);
         }
-        
+
         if (empty($element->product_id)) {
             return;
         }
-        
+
         $db = Factory::getContainer()->get('DatabaseDriver');
-        
-        // Pobierz aktualną cenę produktu
+        $productId = (int)$element->product_id;
+
+        // Pobierz aktualne REGULARNE ceny produktu:
+        // - price_access = 'all'     -> cena ogólnodostępna, nie cena dla wybranej grupy klientów
+        // - price_start_date/end = 0 -> cena stała, nie zaplanowana promocja z zakresem dat
+        // Każda waluta to osobny wiersz - pobieramy wszystkie, bo ceny w różnych walutach
+        // nie są ze sobą porównywalne liczbowo (MIN po samej wartości mieszałoby waluty)
         $query = $db->getQuery(true)
             ->select($db->quoteName(['price_value', 'price_currency_id']))
             ->from($db->quoteName('#__hikashop_price'))
-            ->where($db->quoteName('price_product_id') . ' = ' . (int)$element->product_id)
+            ->where($db->quoteName('price_product_id') . ' = ' . $productId)
             ->where($db->quoteName('price_min_quantity') . ' = 0')
-            ->order($db->quoteName('price_value') . ' ASC')
-            ->setLimit(1);
-        
+            ->where($db->quoteName('price_access') . ' = ' . $db->quote('all'))
+            ->where($db->quoteName('price_start_date') . ' = 0')
+            ->where($db->quoteName('price_end_date') . ' = 0');
+
         $db->setQuery($query);
-        $price = $db->loadObject();
-        
-        if (!$price) {
-            return;
+        $prices = $db->loadObjectList();
+
+        foreach ($prices as $price) {
+            $this->savePriceHistoryEntry($productId, (int)$price->price_currency_id, (float)$price->price_value, $db);
         }
-        
-        // Sprawdź czy ta sama cena już istnieje w historii
+    }
+
+    /**
+     * Zapisuje pojedynczy wpis historii ceny (dla konkretnej waluty), z deduplikacją
+     */
+    private function savePriceHistoryEntry($productId, $currencyId, $priceValue, $db)
+    {
+        // Sprawdź czy ta sama cena (w tej samej walucie) już istnieje w historii
         $query = $db->getQuery(true)
             ->select($db->quoteName('price'))
             ->from($db->quoteName('#__hikashop_price_history'))
-            ->where($db->quoteName('product_id') . ' = ' . (int)$element->product_id)
+            ->where($db->quoteName('product_id') . ' = ' . $productId)
+            ->where($db->quoteName('currency_id') . ' = ' . $currencyId)
             ->order($db->quoteName('date_added') . ' DESC')
             ->setLimit(1);
-        
+
         $db->setQuery($query);
         $lastPrice = $db->loadResult();
-        
+
         // Jeśli cena się nie zmieniła, nie zapisuj duplikatu
-        if ($lastPrice !== null && (float)$lastPrice === (float)$price->price_value) {
+        if ($lastPrice !== null && (float)$lastPrice === $priceValue) {
             return;
         }
-        
+
         // Zapisz cenę do historii
         $data = (object)[
-            'product_id' => (int)$element->product_id,
-            'price' => (float)$price->price_value,
-            'currency_id' => (int)$price->price_currency_id,
+            'product_id' => $productId,
+            'price' => $priceValue,
+            'currency_id' => $currencyId,
             'date_added' => Factory::getDate()->toSql()
         ];
-        
+
         $db->insertObject('#__hikashop_price_history', $data);
     }
     
@@ -109,15 +121,15 @@ class Omnibus extends CMSPlugin
         if (hikashop_isClient('administrator')) {
             return;
         }
-        
-        // Załaduj CSS z dynamicznymi parametrami
-        $this->loadCustomCSS();
-        
+
         // Sprawdź czy to widok produktu
         if (empty($view->getName()) || $view->getName() != 'product') {
             return;
         }
-        
+
+        // Załaduj CSS z dynamicznymi parametrami (tylko na widoku produktu, gdzie jest używany)
+        $this->loadCustomCSS();
+
         // Sprawdź czy mamy element produktu
         if (!empty($view->element) && !empty($view->element->product_id)) {
             $lowestPriceHtml = $this->getLowestPriceHtml($view->element);
@@ -140,12 +152,15 @@ class Omnibus extends CMSPlugin
      */
     private function loadCustomCSS()
     {
-        $fontSize = $this->params->get('font_size', '0.85em');
-        $textColor = $this->params->get('text_color', '#666666');
+        // Walidacja formatu przed wstrzyknięciem do <style> - pola konfiguracyjne to zwykły
+        // tekst, więc bez tego nieprawidłowa (lub złośliwa) wartość mogłaby wyrenderować
+        // dowolny CSS/HTML na każdej stronie frontendu
+        $fontSize = $this->sanitizeCssUnit($this->params->get('font_size', '0.85em'), '0.85em');
+        $textColor = $this->sanitizeCssColor($this->params->get('text_color', '#666666'), '#666666');
         $strikethrough = $this->params->get('strikethrough', 1);
-        $marginTop = $this->params->get('margin_top', '10px');
-        $marginBottom = $this->params->get('margin_bottom', '10px');
-        
+        $marginTop = $this->sanitizeCssUnit($this->params->get('margin_top', '10px'), '10px');
+        $marginBottom = $this->sanitizeCssUnit($this->params->get('margin_bottom', '10px'), '10px');
+
         $css = "
         .hikashop-omnibus-lowest-price {
             margin-top: {$marginTop};
@@ -160,81 +175,89 @@ class Omnibus extends CMSPlugin
         
         Factory::getApplication()->getDocument()->addStyleDeclaration($css);
     }
-    
+
+    /**
+     * Waliduje wartość jednostki CSS (np. "10px", "0.85em", "-5px"), inaczej zwraca domyślną
+     */
+    private function sanitizeCssUnit($value, $default)
+    {
+        return preg_match('/^-?\d+(\.\d+)?(px|em|rem|%)$/', (string)$value) ? $value : $default;
+    }
+
+    /**
+     * Waliduje wartość koloru CSS w formacie hex (np. "#666", "#666666"), inaczej zwraca domyślną
+     */
+    private function sanitizeCssColor($value, $default)
+    {
+        return preg_match('/^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$/', (string)$value) ? $value : $default;
+    }
+
     /**
      * Pobiera sformatowany HTML z najniższą ceną
      */
     private function getLowestPriceHtml($product)
     {
-        $db = Factory::getContainer()->get('DatabaseDriver');
-        
-        // Pobierz liczbę dni z konfiguracji
-        $daysCount = (int)$this->params->get('days_count', 30);
-        
-        // Oblicz datę wstecz
-        $dateLimit = Factory::getDate('-' . $daysCount . ' days')->toSql();
-        
-        // Zapytanie o najniższą cenę z ostatnich X dni
-        $query = $db->getQuery(true)
-            ->select('MIN(' . $db->quoteName('price') . ') AS lowest_price')
-            ->select($db->quoteName('currency_id'))
-            ->select('COUNT(*) AS entries_count')
-            ->from($db->quoteName('#__hikashop_price_history'))
-            ->where($db->quoteName('product_id') . ' = ' . (int)$product->product_id)
-            ->where($db->quoteName('date_added') . ' >= ' . $db->quote($dateLimit))
-            ->group($db->quoteName('currency_id'));
-        
-        $db->setQuery($query);
-        $lowestPrice = $db->loadObject();
-        
-        if (!$lowestPrice || !$lowestPrice->lowest_price) {
+        if (empty($product->prices)) {
             return '';
         }
-        
-        // KLUCZOWE: Zgodnie z dyrektywą Omnibus informacja ma się pokazywać 
-        // TYLKO przy ogłoszeniu obniżki (rabat, promocja, kupon)
-        
-        // Sprawdź czy produkt ma obecnie rabat aktywny
-        $hasDiscount = false;
-        
-        if (!empty($product->prices)) {
-            $priceObj = reset($product->prices);
-            
-            // HikaShop przechowuje cenę przed rabatem w price_value_without_discount
-            if (isset($priceObj->price_value_without_discount) && $priceObj->price_value_without_discount > $priceObj->price_value) {
-                $hasDiscount = true;
-            }
-        }
-        
-        // Jeśli NIE MA rabatu/promocji, nie pokazuj informacji
+
+        $priceObj = reset($product->prices);
+
+        // KLUCZOWE: Zgodnie z dyrektywą Omnibus informacja ma się pokazywać
+        // TYLKO przy ogłoszeniu obniżki (rabat, promocja, kupon).
+        // HikaShop przechowuje cenę przed rabatem w price_value_without_discount
+        $hasDiscount = isset($priceObj->price_value_without_discount)
+            && $priceObj->price_value_without_discount > $priceObj->price_value;
+
         if (!$hasDiscount) {
             return '';
         }
-        
-        $priceToShow = $lowestPrice->lowest_price;
-        
-        // Jeśli produkt ma aktualną cenę z podatkiem, użyj współczynnika
-        if (!empty($product->prices)) {
-            $currentPrice = reset($product->prices);
-            
-            // Jeśli mamy cenę z podatkiem różną od ceny netto
-            if (isset($currentPrice->price_value_with_tax) 
-                && isset($currentPrice->price_value)
-                && $currentPrice->price_value > 0
-                && $currentPrice->price_value_with_tax != $currentPrice->price_value) {
-                // Zastosuj ten sam współczynnik do najniższej ceny
-                $taxMultiplier = $currentPrice->price_value_with_tax / $currentPrice->price_value;
-                $priceToShow = $lowestPrice->lowest_price * $taxMultiplier;
-            }
+
+        // Waluta aktualnie wyświetlanej ceny - historia jest zapisywana per waluta,
+        // więc porównujemy tylko wpisy w tej samej walucie (bez mieszania kursów)
+        $currencyId = (int)($priceObj->price_currency_id ?? 0);
+
+        $db = Factory::getContainer()->get('DatabaseDriver');
+
+        // Pobierz liczbę dni z konfiguracji
+        $daysCount = (int)$this->params->get('days_count', 30);
+
+        // Oblicz datę wstecz
+        $dateLimit = Factory::getDate('-' . $daysCount . ' days')->toSql();
+
+        // Zapytanie o najniższą cenę z ostatnich X dni (w tej samej walucie)
+        $query = $db->getQuery(true)
+            ->select('MIN(' . $db->quoteName('price') . ') AS lowest_price')
+            ->from($db->quoteName('#__hikashop_price_history'))
+            ->where($db->quoteName('product_id') . ' = ' . (int)$product->product_id)
+            ->where($db->quoteName('currency_id') . ' = ' . $currencyId)
+            ->where($db->quoteName('date_added') . ' >= ' . $db->quote($dateLimit));
+
+        $db->setQuery($query);
+        $lowestPrice = $db->loadResult();
+
+        if (!$lowestPrice) {
+            return '';
         }
-        
+
+        $priceToShow = (float)$lowestPrice;
+
+        // Jeśli mamy cenę z podatkiem różną od ceny netto, zastosuj ten sam współczynnik
+        // do najniższej ceny historycznej (która jest zapisana netto)
+        if (isset($priceObj->price_value_with_tax, $priceObj->price_value)
+            && $priceObj->price_value > 0
+            && $priceObj->price_value_with_tax != $priceObj->price_value) {
+            $taxMultiplier = $priceObj->price_value_with_tax / $priceObj->price_value;
+            $priceToShow *= $taxMultiplier;
+        }
+
         // Formatuj cenę używając funkcji HikaShop
         $currencyHelper = hikashop_get('class.currency');
-        $formattedPrice = $currencyHelper->format($priceToShow, $lowestPrice->currency_id);
-        
-        // Przygotuj tekst z tłumaczeniem
-        $text = Text::_('PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_LABEL');
-        
+        $formattedPrice = $currencyHelper->format($priceToShow, $currencyId);
+
+        // Przygotuj tekst z tłumaczeniem (liczba dni jest wstrzykiwana do etykiety)
+        $text = Text::sprintf('PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_LABEL', $daysCount);
+
         // Zwróć sformatowany HTML
         return '<div class="hikashop-omnibus-lowest-price">
             <span class="omnibus-price-label">' . $text . ': </span>
