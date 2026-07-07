@@ -86,4 +86,7 @@
             </fieldset>
         </fields>
     </config>
+    <updateservers>
+        <server type="extension" name="Omnibus - Najniższa cena z 30 dni Updates">https://raw.githubusercontent.com/pablop76/plg_hikashop_omnibus/release/updates.xml</server>
+    </updateservers>
 </extension>
