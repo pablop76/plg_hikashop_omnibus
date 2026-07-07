@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <extension method="upgrade" type="plugin" group="hikashop">
     <name>PLG_HIKASHOP_OMNIBUS</name>
-    <version>1.0</version>
+    <version>1.0.1</version>
     <description>PLG_HIKASHOP_OMNIBUS_DESCRIPTION</description>
     <author>Paweł Półtoraczyk</author>
     <creationDate>07-07-2026</creationDate>

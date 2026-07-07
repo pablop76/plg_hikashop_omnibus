@@ -124,6 +124,11 @@ W razie problemów utwórz [Issue](../../issues) na GitHubie.
 
 ## Changelog
 
+### v1.0.1 (2026-07-07)
+
+- Poprawka: `<creationDate>` w manifeście zsynchronizowana z faktyczną datą wydania (Joomla nie robi tego automatycznie)
+- Poprawka: `targetplatform` w `updates.xml` zwężony do Joomla 6.x (zgodnie z deklarowanymi wymaganiami — wcześniej dopuszczał też 4.x/5.x, na których wtyczka nie była testowana)
+
 ### v1.0 (2026-07-07)
 - Pierwsze wydanie
 - Zgodność z dyrektywą Omnibus UE
