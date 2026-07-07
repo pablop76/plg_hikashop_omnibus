@@ -124,9 +124,13 @@ W razie problemów utwórz [Issue](../../issues) na GitHubie.
 
 ## Changelog
 
-### v1.0 (2025-12-07)
+### v1.0 (2026-07-07)
 - Pierwsze wydanie
 - Zgodność z dyrektywą Omnibus UE
 - Automatyczne wykrywanie rabatów HikaShop
 - Pełna konfiguracja w panelu administracyjnym
 - Wsparcie wielojęzyczne PL/EN
+- Zapis historii cen pomija aktywne promocje czasowe i ceny grupowe (tylko cena regularna, ogólnodostępna)
+- Historia cen liczona osobno per waluta
+- Etykieta najniższej ceny odzwierciedla skonfigurowaną liczbę dni (zamiast sztywnych "30 dni")
+- Walidacja wartości CSS z konfiguracji przed wstrzyknięciem do strony
