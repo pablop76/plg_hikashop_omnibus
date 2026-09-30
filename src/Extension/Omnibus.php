@@ -5,6 +5,8 @@ namespace Pablop76\Plugin\Hikashop\Omnibus\Extension;
 defined('_JEXEC') or die;
 
 use Joomla\CMS\Plugin\CMSPlugin;
+use Joomla\CMS\Event\Plugin\AjaxEvent;
+use Joomla\CMS\Session\Session;
 use Joomla\Event\Event;
 use Joomla\CMS\Factory;
 use Joomla\CMS\Language\Text;
@@ -193,6 +195,136 @@ class Omnibus extends CMSPlugin
     }
 
     /**
+     * Najniższa cena z historii w oknie od $dateLimit (w tej samej walucie).
+     *
+     * Historia zapisuje tylko ZMIANY ceny (deduplikacja), więc cena niezmieniona od
+     * dawna ma jeden wpis sprzed okna. Ten wpis nadal obowiązywał na początku okna,
+     * dlatego doliczamy ostatni wpis sprzed $dateLimit - bez tego produkt ze stałą
+     * ceną starszą niż okno nie dostawałby żadnej informacji.
+     */
+    private function getLowestHistoryPrice($productId, $currencyId, $dateLimit, $db)
+    {
+        $query = $db->getQuery(true)
+            ->select('MIN(' . $db->quoteName('price') . ')')
+            ->from($db->quoteName('#__hikashop_price_history'))
+            ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
+            ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
+            ->where($db->quoteName('date_added') . ' >= ' . $db->quote($dateLimit));
+        $db->setQuery($query);
+        $inWindow = $db->loadResult();
+
+        $query = $db->getQuery(true)
+            ->select($db->quoteName('price'))
+            ->from($db->quoteName('#__hikashop_price_history'))
+            ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
+            ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
+            ->where($db->quoteName('date_added') . ' < ' . $db->quote($dateLimit))
+            ->order($db->quoteName('date_added') . ' DESC, ' . $db->quoteName('id') . ' DESC')
+            ->setLimit(1);
+        $db->setQuery($query);
+        $before = $db->loadResult();
+
+        $candidates = array_filter([$inWindow, $before], static function ($v) {
+            return $v !== null;
+        });
+
+        return $candidates ? min(array_map('floatval', $candidates)) : null;
+    }
+
+    /**
+     * Obsługa akcji czyszczenia historii z ustawień wtyczki (com_ajax, group=hikashop).
+     *
+     * task=product&product_id=N  - kasuje historię produktu i zapisuje jego cenę bieżącą
+     *                              jako nowy punkt startowy (dla pomyłek w cenach)
+     * task=old                   - kasuje wpisy starsze niż okno "Liczba dni", ale zostawia
+     *                              dla każdego produktu i waluty ostatni wpis sprzed okna
+     *                              (to cena, która obowiązywała na początku okna)
+     */
+    public function onAjaxOmnibus(AjaxEvent $event)
+    {
+        $app = $this->getApplication();
+        $user = $app ? $app->getIdentity() : null;
+
+        if (!$app || !$app->isClient('administrator') || !$user || !$user->authorise('core.manage', 'com_plugins')) {
+            $event->updateEventResult(['ok' => false, 'message' => Text::_('JGLOBAL_AUTH_ACCESS_DENIED')]);
+            return;
+        }
+
+        if (!Session::checkToken('get')) {
+            $event->updateEventResult(['ok' => false, 'message' => Text::_('JINVALID_TOKEN_NOTICE')]);
+            return;
+        }
+
+        $db = Factory::getContainer()->get('DatabaseDriver');
+        $task = $app->getInput()->getCmd('task');
+
+        if ($task === 'product') {
+            $productId = $app->getInput()->getInt('product_id');
+
+            if ($productId <= 0) {
+                $event->updateEventResult(['ok' => false, 'message' => Text::_('PLG_HIKASHOP_OMNIBUS_CLEAN_BAD_ID')]);
+                return;
+            }
+
+            $query = $db->getQuery(true)
+                ->delete($db->quoteName('#__hikashop_price_history'))
+                ->where($db->quoteName('product_id') . ' = ' . $productId);
+            $db->setQuery($query)->execute();
+            $deleted = $db->getAffectedRows();
+
+            $this->savePriceHistory((object)['product_id' => $productId]);
+
+            $event->updateEventResult([
+                'ok' => true,
+                'message' => Text::sprintf('PLG_HIKASHOP_OMNIBUS_CLEAN_PRODUCT_DONE', $productId, $deleted),
+            ]);
+            return;
+        }
+
+        if ($task === 'old') {
+            $daysCount = max(1, (int)$this->params->get('days_count', 30));
+            $dateLimit = Factory::getDate('-' . $daysCount . ' days')->toSql();
+
+            $query = $db->getQuery(true)
+                ->select($db->quoteName(['id', 'product_id', 'currency_id']))
+                ->from($db->quoteName('#__hikashop_price_history'))
+                ->where($db->quoteName('date_added') . ' < ' . $db->quote($dateLimit))
+                ->order($db->quoteName(['product_id', 'currency_id', 'date_added', 'id']));
+            $db->setQuery($query);
+            $rows = $db->loadObjectList();
+
+            // W każdej grupie (produkt + waluta) ostatni wpis sprzed okna zostaje
+            $toDelete = [];
+            $count = count($rows);
+            for ($i = 0; $i < $count; $i++) {
+                $next = $rows[$i + 1] ?? null;
+                $isLastInGroup = !$next
+                    || $next->product_id !== $rows[$i]->product_id
+                    || $next->currency_id !== $rows[$i]->currency_id;
+
+                if (!$isLastInGroup) {
+                    $toDelete[] = (int)$rows[$i]->id;
+                }
+            }
+
+            foreach (array_chunk($toDelete, 500) as $chunk) {
+                $query = $db->getQuery(true)
+                    ->delete($db->quoteName('#__hikashop_price_history'))
+                    ->where($db->quoteName('id') . ' IN (' . implode(',', $chunk) . ')');
+                $db->setQuery($query)->execute();
+            }
+
+            $event->updateEventResult([
+                'ok' => true,
+                'message' => Text::sprintf('PLG_HIKASHOP_OMNIBUS_CLEAN_OLD_DONE', count($toDelete), $daysCount),
+            ]);
+            return;
+        }
+
+        $event->updateEventResult(['ok' => false, 'message' => Text::_('PLG_HIKASHOP_OMNIBUS_CLEAN_BAD_TASK')]);
+    }
+
+    /**
      * Pobiera sformatowany HTML z najniższą ceną
      */
     private function getLowestPriceHtml($product)
@@ -225,16 +357,7 @@ class Omnibus extends CMSPlugin
         // Oblicz datę wstecz
         $dateLimit = Factory::getDate('-' . $daysCount . ' days')->toSql();
 
-        // Zapytanie o najniższą cenę z ostatnich X dni (w tej samej walucie)
-        $query = $db->getQuery(true)
-            ->select('MIN(' . $db->quoteName('price') . ') AS lowest_price')
-            ->from($db->quoteName('#__hikashop_price_history'))
-            ->where($db->quoteName('product_id') . ' = ' . (int)$product->product_id)
-            ->where($db->quoteName('currency_id') . ' = ' . $currencyId)
-            ->where($db->quoteName('date_added') . ' >= ' . $db->quote($dateLimit));
-
-        $db->setQuery($query);
-        $lowestPrice = $db->loadResult();
+        $lowestPrice = $this->getLowestHistoryPrice((int)$product->product_id, $currencyId, $dateLimit, $db);
 
         if (!$lowestPrice) {
             return '';

@@ -105,8 +105,10 @@ plg_hikashop_omnibus/
 │   ├── install.mysql.utf8.sql
 │   └── uninstall.mysql.utf8.sql
 ├── src/
-│   └── Extension/
-│       └── Omnibus.php  # Główna klasa pluginu
+│   ├── Extension/
+│   │   └── Omnibus.php  # Główna klasa pluginu
+│   └── Field/
+│       └── HistoryField.php  # Przyciski czyszczenia historii w ustawieniach
 └── omnibus.xml        # Manifest instalacyjny
 ```
 
@@ -123,6 +125,12 @@ Paweł Półtoraczyk (pablop76)
 W razie problemów utwórz [Issue](../../issues) na GitHubie.
 
 ## Changelog
+
+### v1.1.0 (2026-09-30)
+
+- Nowość: w ustawieniach wtyczki zakładka **Historia cen** z czyszczeniem historii: dla wskazanego produktu (kasuje historię i zapisuje cenę bieżącą jako nowy punkt startowy) oraz usuwanie wpisów starszych niż okno „Liczba dni” (zostaje ostatni wpis sprzed okna)
+- Poprawka: produkt z ceną niezmienianą dłużej niż okno „Liczba dni” dostawał pustą informację, bo historia zapisuje tylko zmiany ceny; teraz liczy się także ostatni wpis sprzed okna
+- Uwaga: czyścić należy tylko pomyłki; cena, po której produkt faktycznie sprzedawano w oknie, musi zostać w historii
 
 ### v1.0.1 (2026-07-07)
 

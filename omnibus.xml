@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <extension method="upgrade" type="plugin" group="hikashop">
     <name>PLG_HIKASHOP_OMNIBUS</name>
-    <version>1.0.1</version>
+    <version>1.1.0</version>
     <description>PLG_HIKASHOP_OMNIBUS_DESCRIPTION</description>
     <author>Paweł Półtoraczyk</author>
     <creationDate>07-07-2026</creationDate>
@@ -33,7 +33,7 @@
     </languages>
     <config>
         <fields name="params">
-            <fieldset name="basic">
+            <fieldset name="basic" addfieldprefix="Pablop76\Plugin\Hikashop\Omnibus\Field">
                 <field
                     name="days_count"
                     type="number"
@@ -82,6 +82,13 @@
                     label="PLG_HIKASHOP_OMNIBUS_MARGIN_BOTTOM_LABEL"
                     description="PLG_HIKASHOP_OMNIBUS_MARGIN_BOTTOM_DESC"
                     default="10px"
+                />
+            </fieldset>
+            <fieldset name="history" label="PLG_HIKASHOP_OMNIBUS_CLEAN_FIELDSET" addfieldprefix="Pablop76\Plugin\Hikashop\Omnibus\Field">
+                <field
+                    name="history_tools"
+                    type="history"
+                    label=""
                 />
             </fieldset>
         </fields>
