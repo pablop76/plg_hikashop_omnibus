@@ -620,7 +620,11 @@ class Omnibus extends CMSPlugin
                     continue;
                 }
                 if ($moveToPrice) {
-                    $html = str_replace('class="hikashop-omnibus-lowest-price"', 'class="hikashop-omnibus-lowest-price" data-omnibus-move="1"', $html);
+                    $html = str_replace(
+                        'class="hikashop-omnibus-lowest-price"',
+                        'class="hikashop-omnibus-lowest-price hikashop-omnibus-lowest-price--list" data-omnibus-move="1"',
+                        $html
+                    );
                 }
 
                 if (!isset($product->extraData) || !is_object($product->extraData)) {
@@ -712,6 +716,19 @@ class Omnibus extends CMSPlugin
         .omnibus-price-value {
             " . ($strikethrough ? "text-decoration: line-through;" : "") . "
         }
+        .hikashop-omnibus-lowest-price--list {
+            margin: 2px 0 4px;
+            font-size: 0.75em;
+            font-weight: normal;
+            line-height: 1.35;
+            letter-spacing: normal;
+            text-transform: none;
+            word-break: normal;
+            overflow-wrap: normal;
+        }
+        .hikashop-omnibus-lowest-price--list .omnibus-price-value {
+            white-space: nowrap;
+        }
         ";
 
         Factory::getApplication()->getDocument()->addStyleDeclaration($css);
@@ -739,6 +756,11 @@ class Omnibus extends CMSPlugin
                 var prices = box.querySelectorAll('.hikashop_product_price_full');
                 if (prices.length === 1) {
                     prices[0].insertAdjacentElement('afterend', info);
+                    // Krój kwoty ceny, nie kontenera karty (w kartach bywa krój nagłówków)
+                    var amount = prices[0].querySelector('.hikashop_product_price');
+                    if (amount) {
+                        info.style.fontFamily = getComputedStyle(amount).fontFamily;
+                    }
                     return;
                 }
                 if (prices.length > 1) {

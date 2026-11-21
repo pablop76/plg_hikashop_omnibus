@@ -63,6 +63,8 @@ Dostępne opcje:
 - **Przekreślenie** - czy cena ma być przekreślona (Tak/Nie)
 - **Margines górny/dolny** - marginesy elementu (np. 10px)
 
+Na listach produktów i w modułach napis jest mniejszy i zwykłej grubości, w kroju kwoty ceny, żeby nie dominował w małych kartach (np. w karuzeli w menu). Wygląd zmienisz w CSS szablonu klasą `.hikashop-omnibus-lowest-price--list`.
+
 ### Cron HikaShopa
 
 Ustaw cron HikaShopa (**Komponenty → HikaShop → Konfiguracja**, zakładka cron). Bez niego do historii trafią tylko zmiany cen zapisane w formularzu produktu albo widoczne przy wyświetleniu produktu. Cron zapisuje zmiany, o których HikaShop nie powiadamia wtyczek:
