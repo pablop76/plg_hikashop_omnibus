@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS `#__hikashop_price_history` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 DEFAULT COLLATE=utf8mb4_unicode_ci;
 
 -- Wypełnij historię aktualnymi cenami regularnymi jako punkt odniesienia: ogólnodostępne,
--- bez zakresu dat i bez progu ilościowego - to samo kryterium co Omnibus::getRegularPrices().
+-- bez progu ilościowego i bez daty końca - to samo kryterium co Omnibus::getRegularPrices().
 -- Obniżki trwające w chwili instalacji dopisze pierwszy przebieg crona albo wyświetlenie produktu.
 INSERT INTO `#__hikashop_price_history` (`product_id`, `price`, `currency_id`, `date_added`)
 SELECT
@@ -23,7 +23,7 @@ FROM `#__hikashop_price`
 WHERE `price_min_quantity` IN (0, 1)
   AND `price_access` = 'all'
   AND `price_users` = ''
-  AND `price_start_date` = 0
+  AND `price_start_date` <= UNIX_TIMESTAMP()
   AND `price_end_date` = 0
 GROUP BY `price_product_id`, `price_currency_id`;
 

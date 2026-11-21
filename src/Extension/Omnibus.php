@@ -45,6 +45,15 @@ class Omnibus extends CMSPlugin
     private $liveBeforeSave = [];
 
     /**
+     * Na stronie bywa kilka widoków produktów (karta, moduły): rabaty i ceny uzgadniamy raz
+     */
+    private $discountsRefreshed = false;
+
+    private $syncedIds = [];
+
+    private $cssLoaded = false;
+
+    /**
      * Przed zapisem rabatu zapamiętujemy, czy już działał: edycja trwającego rabatu to nie
      * nowa obniżka, a włączenie wyłączonego (albo zakończonego) już tak.
      */
@@ -411,8 +420,9 @@ class Omnibus extends CMSPlugin
                 }
 
                 $value = round((float)$price->price_value, 5);
-                $discounted = !empty($row->discount) || $value < $regular[$productId][$currencyId] - 0.000005;
-                $written += $this->addHistoryEntry($db, $productId, $currencyId, $value, $discounted, $now);
+                $regularValue = round($regular[$productId][$currencyId], 5);
+                $discounted = !empty($row->discount) || $value < $regularValue - 0.000005;
+                $written += $this->addHistoryEntry($db, $productId, $currencyId, $value, $discounted, $now, $regularValue);
             }
         }
 
@@ -420,7 +430,8 @@ class Omnibus extends CMSPlugin
     }
 
     /**
-     * Ceny regularne: ogólnodostępne, bez zakresu dat i bez progu ilościowego.
+     * Ceny regularne: ogólnodostępne, bez progu ilościowego i bez daty końca. Data początku
+     * z przeszłości nie przeszkadza (taka cena po prostu obowiązuje od tamtej pory).
      * [product_id][currency_id] => najniższa taka cena
      */
     private function getRegularPrices($db, array $ids)
@@ -433,7 +444,7 @@ class Omnibus extends CMSPlugin
             ->where($db->quoteName('price_min_quantity') . ' IN (0, 1)')
             ->where($db->quoteName('price_access') . ' = ' . $db->quote('all'))
             ->where($db->quoteName('price_users') . ' = ' . $db->quote(''))
-            ->where($db->quoteName('price_start_date') . ' = 0')
+            ->where($db->quoteName('price_start_date') . ' <= ' . time())
             ->where($db->quoteName('price_end_date') . ' = 0')
             ->group($db->quoteName(['price_product_id', 'price_currency_id']));
 
@@ -447,10 +458,12 @@ class Omnibus extends CMSPlugin
 
     /**
      * Dopisuje wpis, gdy cena albo jej rodzaj (regularna/obniżona) różni się od ostatniego.
+     * Produkt bez historii, który trafia do niej w trakcie obniżki, dostaje najpierw cenę
+     * regularną jako punkt startowy (jak przy instalacji): inaczej nie byłoby czego pokazać.
      *
-     * @return int 1 gdy zapisano, 0 gdy bez zmian
+     * @return int liczba zapisanych wpisów
      */
-    private function addHistoryEntry($db, $productId, $currencyId, $value, $discounted, $now)
+    private function addHistoryEntry($db, $productId, $currencyId, $value, $discounted, $now, $regularValue = null)
     {
         $query = $db->getQuery(true)
             ->select($db->quoteName(['price', 'discounted']))
@@ -464,6 +477,11 @@ class Omnibus extends CMSPlugin
             return 0;
         }
 
+        $written = 0;
+        if (!$last && $discounted && $regularValue !== null) {
+            $written += $this->addHistoryEntry($db, $productId, $currencyId, $regularValue, false, $now);
+        }
+
         $data = (object)[
             'product_id' => (int)$productId,
             'price' => $value,
@@ -473,7 +491,7 @@ class Omnibus extends CMSPlugin
         ];
         $db->insertObject(self::HISTORY_TABLE, $data);
 
-        return 1;
+        return $written + 1;
     }
 
     /**
@@ -510,7 +528,8 @@ class Omnibus extends CMSPlugin
     }
 
     /**
-     * Wyświetla najniższą cenę PRZED wyświetleniem widoku produktu
+     * Informacja o najniższej cenie na karcie produktu i na listach produktów (także w modułach
+     * HikaShopa): UOKiK wymaga jej wszędzie, gdzie widać obniżkę konkretnego produktu.
      */
     public function onHikashopBeforeDisplayView(&$view)
     {
@@ -524,41 +543,133 @@ class Omnibus extends CMSPlugin
             return;
         }
 
-        // Załaduj CSS z dynamicznymi parametrami (tylko na widoku produktu, gdzie jest używany)
-        $this->loadCustomCSS();
-
-        if (empty($view->element) || empty($view->element->product_id)) {
+        // Moduł albo lista bez cen nie ogłasza obniżki, więc i informacji nie potrzebuje
+        if (!$this->showsPrices($view)) {
             return;
         }
 
-        $product = $view->element;
-        $lowestPriceHtml = $this->guarded(function () use ($product) {
+        // Karta produktu: miejsce tuż po cenie
+        if (!empty($view->element) && !empty($view->element->product_id)) {
+            $product = $view->element;
+            $this->addLowestPrices([$product], 'rightMiddle', function ($db) use ($product) {
+                return $this->historyProductId($db, $product);
+            });
+            return;
+        }
+
+        // Lista produktów (kategoria, wyszukiwanie, moduł): miejsce przy nazwie i cenie
+        if (!empty($view->rows) && is_array($view->rows)) {
+            $this->addLowestPrices($view->rows, 'afterProductName', function ($db, $row) {
+                return (int)$row->product_id;
+            });
+        }
+    }
+
+    /**
+     * Dopisuje informację do extraData->$position każdego produktu z obniżką.
+     *
+     * @param callable $historyId ($db, $product) => ID produktu, którego historia się liczy
+     */
+    private function addLowestPrices(array $products, $position, callable $historyId)
+    {
+        $discounted = array_filter($products, function ($product) {
+            return is_object($product) && !empty($product->product_id) && $this->hasDiscount($product);
+        });
+
+        if (!$discounted) {
+            return;
+        }
+
+        $this->loadCustomCSS();
+
+        $this->guarded(function () use ($discounted, $position, $historyId) {
             $db = $this->getDb();
             $now = Factory::getDate()->toSql();
             $user = $this->getApplication()->getIdentity();
 
+            $ids = [];
+            foreach ($discounted as $key => $product) {
+                $ids[$key] = (int)$historyId($db, $product);
+            }
+
             // Cena mogła się zmienić bez zapisu produktu (import, akcja masowa, początek rabatu
             // z datą). Zapisujemy tylko przy gościu: rabat HikaShopa może wykluczać grupy
             // zalogowanego klienta, a historia ma mówić o ofercie dla wszystkich.
-            if (!$user || $user->guest) {
-                $this->syncProducts($db, [(int)$product->product_id], $now);
-            } else {
+            // Na stronie bywa kilka list (moduły), więc każdy produkt i rabaty raz na żądanie.
+            $toSync = array_diff(array_unique($ids), array_keys($this->syncedIds));
+            if ((!$user || $user->guest) && $toSync) {
+                $this->syncProducts($db, $toSync, $now, !$this->discountsRefreshed);
+                $this->syncedIds += array_fill_keys($toSync, true);
+                $this->discountsRefreshed = true;
+            } elseif (!$this->discountsRefreshed) {
                 $this->refreshDiscounts($db, $now);
+                $this->discountsRefreshed = true;
             }
 
-            return $this->getLowestPriceHtml($product, $db, $now);
+            foreach ($discounted as $key => $product) {
+                $html = $this->getLowestPriceHtml($product, $ids[$key], $db, $now);
+                if ($html === '') {
+                    continue;
+                }
+
+                if (!isset($product->extraData) || !is_object($product->extraData)) {
+                    $product->extraData = new \stdClass();
+                }
+                if (!isset($product->extraData->{$position}) || !is_array($product->extraData->{$position})) {
+                    $product->extraData->{$position} = [];
+                }
+                $product->extraData->{$position}[] = $html;
+            }
         });
+    }
 
-        if ($lowestPriceHtml) {
-            // Wstrzyknij HTML do extraData->rightMiddle (zaraz po cenie)
-            if (!isset($view->element->extraData)) {
-                $view->element->extraData = new \stdClass();
-            }
-            if (!isset($view->element->extraData->rightMiddle)) {
-                $view->element->extraData->rightMiddle = [];
-            }
-            $view->element->extraData->rightMiddle[] = $lowestPriceHtml;
+    /**
+     * Czy widok pokazuje ceny: to samo sprawdzenie co w szablonach HikaShopa
+     * („-1” = ustawienie z konfiguracji sklepu)
+     */
+    private function showsPrices($view)
+    {
+        if (empty($view->params) || !is_object($view->params) || !method_exists($view->params, 'get')) {
+            return true;
         }
+
+        $show = $view->params->get('show_price', '-1');
+        if ($show === null || (string)$show === '-1') {
+            $show = hikashop_config()->get('show_price', 1);
+        }
+
+        return (bool)$show;
+    }
+
+    /**
+     * Czy na produkt działa rabat HikaShopa (wtedy HikaShop podaje cenę sprzed rabatu)
+     */
+    private function hasDiscount($product)
+    {
+        if (empty($product->prices) || !is_array($product->prices)) {
+            return false;
+        }
+
+        $price = reset($product->prices);
+
+        return is_object($price) && isset($price->price_value_without_discount)
+            && $price->price_value_without_discount > $price->price_value;
+    }
+
+    /**
+     * Czyja historia: przy produkcie z wariantami HikaShop podaje na karcie wariant domyślny,
+     * a produkt główny w ->main. Wariant bez własnej ceny ma cenę (i historię) produktu głównego.
+     */
+    private function historyProductId($db, $product)
+    {
+        $productId = (int)$product->product_id;
+        $mainId = (int)($product->main->product_id ?? 0);
+
+        if ($mainId > 0 && $mainId !== $productId && !$this->getRegularPrices($db, [$productId])) {
+            return $mainId;
+        }
+
+        return $productId;
     }
 
     /**
@@ -566,6 +677,11 @@ class Omnibus extends CMSPlugin
      */
     private function loadCustomCSS()
     {
+        if ($this->cssLoaded) {
+            return;
+        }
+        $this->cssLoaded = true;
+
         // Walidacja formatu przed wstrzyknięciem do <style> - pola konfiguracyjne to zwykły
         // tekst, więc bez tego nieprawidłowa (lub złośliwa) wartość mogłaby wyrenderować
         // dowolny CSS/HTML na każdej stronie frontendu
@@ -785,23 +901,15 @@ class Omnibus extends CMSPlugin
     /**
      * Pobiera sformatowany HTML z najniższą ceną
      */
-    private function getLowestPriceHtml($product, $db, $now)
+    private function getLowestPriceHtml($product, $historyId, $db, $now)
     {
-        if (empty($product->prices)) {
+        // KLUCZOWE: Zgodnie z dyrektywą Omnibus informacja ma się pokazywać
+        // TYLKO przy ogłoszeniu obniżki (rabat HikaShopa)
+        if (!$this->hasDiscount($product)) {
             return '';
         }
 
         $priceObj = reset($product->prices);
-
-        // KLUCZOWE: Zgodnie z dyrektywą Omnibus informacja ma się pokazywać
-        // TYLKO przy ogłoszeniu obniżki (rabat, promocja, kupon).
-        // HikaShop przechowuje cenę przed rabatem w price_value_without_discount
-        $hasDiscount = isset($priceObj->price_value_without_discount)
-            && $priceObj->price_value_without_discount > $priceObj->price_value;
-
-        if (!$hasDiscount) {
-            return '';
-        }
 
         // Waluta aktualnie wyświetlanej ceny - historia jest zapisywana per waluta,
         // więc porównujemy tylko wpisy w tej samej walucie (bez mieszania kursów)
@@ -817,7 +925,7 @@ class Omnibus extends CMSPlugin
         $dateEnd = $this->getDiscountIntroduction($discount, $db, $now) ?? $now;
         $dateLimit = Factory::getDate($dateEnd)->modify('-' . $daysCount . ' days')->toSql();
 
-        $lowestPrice = $this->getLowestHistoryPrice((int)$product->product_id, $currencyId, $dateLimit, $dateEnd, $db);
+        $lowestPrice = $this->getLowestHistoryPrice($historyId, $currencyId, $dateLimit, $dateEnd, $db);
 
         if (!$lowestPrice) {
             return '';

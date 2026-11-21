@@ -10,6 +10,7 @@ Plugin realizuje wymóg **dyrektywy Omnibus (UE) 2019/2161** w zakresie opisanym
 ✅ Pokazuje najniższą cenę z 30 dni **przed wprowadzeniem obniżki** (okno kończy się w dniu wprowadzenia obniżki, nie dziś)  
 ✅ Zapisuje historię cen, po których produkt był oferowany wszystkim klientom: regularnych i obniżonych rabatem HikaShopa, więc cena z poprzedniej promocji też się liczy  
 ✅ Zwiększenie albo zmniejszenie rabatu traktuje jako nową obniżkę (tzw. promocje kroczące)  
+✅ Informacja na karcie produktu, na listach produktów i w modułach HikaShopa  
 ✅ Wyraźna prezentacja z przekreśloną ceną bazową  
 
 ### Jak to działa?
@@ -113,9 +114,9 @@ Opis ceny brzmi „Najniższa cena z 30 dni przed obniżką”. Prezes UOKiK uka
 
 ## Ograniczenia
 
-- Informacja pojawia się tylko na stronie produktu, nie na listach produktów ani w modułach.
+- Na listach produktów i w modułach napis trafia w miejsce `afterProductName` szablonu listy, które w większości układów HikaShopa jest tuż przy cenie (w `listing_img_title` pod ceną, w `listing_hover_x_img_title` nad nią). Układy bez tego miejsca (np. `listing_img`, `listing_div`, `listing_list`) wymagają nadpisania szablonu. Lista albo moduł bez cen napisu nie dostaje. W koszyku informacji nie ma.
 - Reaguje tylko na rabaty HikaShopa. Promocja ustawiona jako osobna cena z zakresem dat albo kupon w koszyku nie wyświetlą informacji (cena z zakresem dat trafia jednak do historii).
-- Dla produktów z wariantami bierze pierwszą cenę produktu głównego.
+- Produkt z wariantami: wariant bez własnej ceny korzysta z historii produktu głównego. Napis jest liczony dla wariantu pokazanego przy wejściu na kartę i nie zmienia się po wyborze innego wariantu, więc przy różnych cenach wariantów może nie pasować.
 - Historia obejmuje ofertę dla wszystkich klientów. Rabaty i ceny tylko dla wybranych grup albo pojedynczych klientów do niej nie trafiają. UOKiK traktuje jednak cenę z promocji dla programu lojalnościowego jako punkt odniesienia dla kolejnych obniżek, więc przy takich promocjach sprawdź napis ręcznie.
 - Cena zmieniona z pominięciem formularza produktu (import, akcja masowa, zapytanie SQL) trafia do historii z datą najbliższego przebiegu crona albo wyświetlenia produktu, a nie z datą zmiany.
 - Ceny z okresu przed instalacją wtyczki nie są znane: punktem startowym jest cena regularna z dnia instalacji.
@@ -164,6 +165,10 @@ W razie problemów utwórz [Issue](../../issues) na GitHubie.
 - Nowość: przebieg crona HikaShopa zapisuje zmiany cen, które omijają zapis produktu: import CSV, akcja masowa „Zaktualizuj wartości”, początek i koniec rabatu z datą, rabat przełączony na liście
 - Nowość: wyświetlenie produktu niezalogowanemu klientowi uzupełnia historię tego produktu, gdy cena zmieniła się bez zapisu
 - Zmiana: rabat zakończony albo wyłączony traci zapamiętaną datę wprowadzenia, więc ponowne włączenie liczy się jako nowa obniżka; rabat z datą rozpoczęcia, który wtyczka zauważa bez zapisu w formularzu, liczy się od tej daty
+- Nowość: informacja na listach produktów i w modułach HikaShopa (miejsce `afterProductName` szablonu listy); lista albo moduł bez cen jej nie dostaje
+- Poprawka: produkt z wariantami bez własnych cen nie dostawał informacji, bo HikaShop podaje na karcie wariant domyślny; teraz liczy się historia produktu głównego
+- Poprawka: cena z datą rozpoczęcia z przeszłości i bez daty końca to cena regularna (wcześniej taki produkt nie miał historii ani informacji)
+- Nowość: produkt bez historii, który trafia do niej w trakcie obniżki, dostaje najpierw cenę regularną jako punkt startowy
 - Zmiana: „Wyczyść historię produktu” zapisuje jako punkt startowy cenę regularną, a przy trwającej obniżce zaraz po niej cenę obniżoną
 - Poprawka: błąd wtyczki (np. brak kolumny po aktualizacji) nie blokuje strony produktu ani zapisu w panelu; brakujące kolumny wtyczka dodaje sama
 - Baza: kolumna `discounted` w `#__hikashop_price_history` i `conditions` w `#__hikashop_omnibus_discount` (przy aktualizacji dodawane automatycznie)
