@@ -6,6 +6,7 @@ defined('_JEXEC') or die;
 
 use Joomla\CMS\Plugin\CMSPlugin;
 use Joomla\CMS\Event\Plugin\AjaxEvent;
+use Joomla\CMS\Log\Log;
 use Joomla\CMS\Session\Session;
 use Joomla\Event\Event;
 use Joomla\CMS\Factory;
@@ -19,35 +20,82 @@ class Omnibus extends CMSPlugin
     protected $autoloadLanguage = true;
 
     /**
-     * Chwila włączenia rabatów bez daty rozpoczęcia (HikaShop jej nie przechowuje)
+     * Historia cen, po których produkt był oferowany wszystkim klientom
+     */
+    private const HISTORY_TABLE = '#__hikashop_price_history';
+
+    /**
+     * Chwila wprowadzenia obniżki dla każdego trwającego albo zaplanowanego rabatu
      */
     private const DISCOUNT_TABLE = '#__hikashop_omnibus_discount';
 
     /**
-     * Zapamiętuje włączenie rabatu: art. 4 ust. 2 ustawy o informowaniu o cenach liczy
-     * 30 dni wstecz od wprowadzenia obniżki, a rabat bez daty rozpoczęcia nie ma jej w bazie.
+     * Ile produktów naraz przelicza cron
      */
+    private const CHUNK = 200;
+
+    /**
+     * Trwa wyliczanie ceny ogólnodostępnej: zdarzenia HikaShopa zawężają wtedy ceny i rabaty
+     */
+    private $offerSync = false;
+
+    /**
+     * Czy rabat był aktywny (opublikowany, niezakończony) przed zapisem w formularzu
+     */
+    private $liveBeforeSave = [];
+
+    /**
+     * Przed zapisem rabatu zapamiętujemy, czy już działał: edycja trwającego rabatu to nie
+     * nowa obniżka, a włączenie wyłączonego (albo zakończonego) już tak.
+     */
+    public function onBeforeDiscountUpdate(&$discount, &$do = null)
+    {
+        $this->guarded(function () use ($discount) {
+            $element = $discount instanceof Event ? $discount->getArgument(0) : $discount;
+            $discountId = (int)($element->discount_id ?? 0);
+
+            if ($discountId <= 0) {
+                return;
+            }
+
+            $db = $this->getDb();
+            $query = $db->getQuery(true)
+                ->select($db->quoteName(['discount_type', 'discount_published', 'discount_end']))
+                ->from($db->quoteName('#__hikashop_discount'))
+                ->where($db->quoteName('discount_id') . ' = ' . $discountId);
+            $row = $db->setQuery($query)->loadObject();
+
+            $this->liveBeforeSave[$discountId] = $row && $row->discount_type === 'discount'
+                && (int)$row->discount_published === 1
+                && ((int)$row->discount_end === 0 || (int)$row->discount_end > time());
+        });
+    }
+
     public function onAfterDiscountCreate(&$discount)
     {
-        $this->recordDiscountState($discount);
+        $this->guarded(function () use ($discount) {
+            $this->discountSaved($discount);
+        });
     }
 
     public function onAfterDiscountUpdate(&$discount)
     {
-        $this->recordDiscountState($discount);
+        $this->guarded(function () use ($discount) {
+            $this->discountSaved($discount);
+        });
     }
 
     /**
-     * Opublikowany rabat dostaje datę włączenia (tylko pierwszą), wyłączony ją traci:
-     * ponowne włączenie to nowa obniżka.
+     * Rabat zapisany w formularzu: włączony teraz dostaje dzisiejszą datę wprowadzenia,
+     * pozostałe zmiany (wartość, wyłączenie) rozstrzyga refreshDiscounts().
      */
-    private function recordDiscountState($discount)
+    private function discountSaved($discount)
     {
         if ($discount instanceof Event) {
             $discount = $discount->getArgument(0);
         }
 
-        $db = Factory::getContainer()->get('DatabaseDriver');
+        $db = $this->getDb();
 
         $discountId = (int)($discount->discount_id ?? 0);
         if ($discountId <= 0 && !empty($discount->discount_code)) {
@@ -64,109 +112,156 @@ class Omnibus extends CMSPlugin
             return;
         }
 
-        // Stan po zapisie bierzemy z bazy: obiekt zdarzenia bywa niepełny (tylko zmienione pola)
-        $query = $db->getQuery(true)
-            ->select($db->quoteName(['discount_type', 'discount_published']))
-            ->from($db->quoteName('#__hikashop_discount'))
-            ->where($db->quoteName('discount_id') . ' = ' . $discountId);
-        $row = $db->setQuery($query)->loadObject();
+        $introduced = empty($this->liveBeforeSave[$discountId]) ? $discountId : 0;
+        unset($this->liveBeforeSave[$discountId]);
 
-        $this->ensureDiscountTable($db);
-
-        if ($row && $row->discount_type === 'discount' && (int)$row->discount_published === 1) {
-            $this->insertIntroduction($db, $discountId, Factory::getDate()->toSql());
-            return;
-        }
-
-        $query = $db->getQuery(true)
-            ->delete($db->quoteName(self::DISCOUNT_TABLE))
-            ->where($db->quoteName('discount_id') . ' = ' . $discountId);
-        $db->setQuery($query)->execute();
-    }
-
-    private function ensureDiscountTable($db)
-    {
-        $db->setQuery(
-            'CREATE TABLE IF NOT EXISTS ' . $db->quoteName(self::DISCOUNT_TABLE) . ' ('
-            . $db->quoteName('discount_id') . ' int(11) NOT NULL, '
-            . $db->quoteName('active_since') . ' datetime NOT NULL, '
-            . 'PRIMARY KEY (' . $db->quoteName('discount_id') . ')'
-            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 DEFAULT COLLATE=utf8mb4_unicode_ci'
-        )->execute();
+        $this->refreshDiscounts($db, Factory::getDate()->toSql(), $introduced);
     }
 
     /**
-     * IGNORE: istniejąca data zostaje, liczy się pierwsze włączenie
+     * Uzgadnia daty wprowadzenia obniżek z rabatami HikaShopa.
+     *
+     * Wpis ma każdy opublikowany, niezakończony rabat. Wyłączony albo zakończony rabat traci
+     * wpis, więc ponowne włączenie to nowa obniżka. Zmiana wartości rabatu to też nowa
+     * obniżka: Polska nie ma wyjątku dla tzw. promocji kroczących, każdą obniżkę liczy się
+     * od najniższej ceny z 30 dni przed nią (wyjaśnienia Prezesa UOKiK, pkt III.6 i V.1).
+     *
+     * @param int $introducedId rabat włączony właśnie w formularzu (wprowadzony teraz)
      */
-    private function insertIntroduction($db, $discountId, $date)
+    private function refreshDiscounts($db, $now, $introducedId = 0)
     {
-        $db->setQuery(
-            'INSERT IGNORE INTO ' . $db->quoteName(self::DISCOUNT_TABLE)
-            . ' (' . $db->quoteName('discount_id') . ', ' . $db->quoteName('active_since') . ')'
-            . ' VALUES (' . (int)$discountId . ', ' . $db->quote($date) . ')'
-        )->execute();
+        $time = Factory::getDate($now)->toUnix();
+
+        $query = $db->getQuery(true)
+            ->select($db->quoteName(['discount_id', 'discount_start', 'discount_flat_amount', 'discount_percent_amount', 'discount_currency_id']))
+            ->from($db->quoteName('#__hikashop_discount'))
+            ->where($db->quoteName('discount_type') . ' = ' . $db->quote('discount'))
+            ->where($db->quoteName('discount_published') . ' = 1')
+            ->where('(' . $db->quoteName('discount_end') . ' = 0 OR ' . $db->quoteName('discount_end') . ' > ' . (int)$time . ')');
+        $live = $db->setQuery($query)->loadObjectList('discount_id');
+
+        $query = $db->getQuery(true)
+            ->select($db->quoteName(['discount_id', 'active_since', 'conditions']))
+            ->from($db->quoteName(self::DISCOUNT_TABLE));
+        $known = $db->setQuery($query)->loadObjectList('discount_id');
+
+        $gone = array_map('intval', array_diff(array_keys($known), array_keys($live)));
+        if ($gone) {
+            $query = $db->getQuery(true)
+                ->delete($db->quoteName(self::DISCOUNT_TABLE))
+                ->where($db->quoteName('discount_id') . ' IN (' . implode(',', $gone) . ')');
+            $db->setQuery($query)->execute();
+        }
+
+        foreach ($live as $discountId => $discount) {
+            $discountId = (int)$discountId;
+            $conditions = $this->discountConditions($discount);
+            $row = $known[$discountId] ?? null;
+
+            if ($discountId === (int)$introducedId) {
+                $since = $now;
+            } elseif ($row === null) {
+                // Rabat włączony bez formularza (przycisk na liście, akcja masowa) albo przed 1.3.0:
+                // rabat z datą zaczął się w dacie rozpoczęcia, bez daty liczymy od teraz
+                $start = (int)$discount->discount_start;
+                $since = ($start > 0 && $start <= $time) ? Factory::getDate($start)->toSql() : $now;
+            } elseif ((string)$row->conditions === '') {
+                // Wpis sprzed 1.3.0: data zostaje, zapamiętujemy tylko warunki
+                $since = $row->active_since;
+            } elseif ($row->conditions !== $conditions) {
+                $since = $now;
+            } else {
+                continue;
+            }
+
+            $db->setQuery(
+                'REPLACE INTO ' . $db->quoteName(self::DISCOUNT_TABLE)
+                . ' (' . $db->quoteName('discount_id') . ', ' . $db->quoteName('active_since') . ', ' . $db->quoteName('conditions') . ')'
+                . ' VALUES (' . $discountId . ', ' . $db->quote($since) . ', ' . $db->quote($conditions) . ')'
+            )->execute();
+        }
+    }
+
+    /**
+     * Warunki obniżki: wartość rabatu. Jej zmiana oznacza nową obniżkę.
+     */
+    private function discountConditions($discount)
+    {
+        return md5(sprintf(
+            '%.5F|%.5F|%d',
+            (float)$discount->discount_flat_amount,
+            (float)$discount->discount_percent_amount,
+            (int)$discount->discount_currency_id
+        ));
     }
 
     /**
      * Dzień wprowadzenia obniżki (SQL datetime, UTC) albo null, gdy rabatu nie da się ustalić.
+     * To późniejsza z dat: rozpoczęcia rabatu i zapamiętanego wprowadzenia (włączenie,
+     * zmiana wartości).
      */
-    private function getDiscountIntroduction($discount, $db)
+    private function getDiscountIntroduction($discount, $db, $now)
     {
         if (!is_object($discount)) {
             return null;
         }
 
-        if (!empty($discount->discount_start)) {
-            return Factory::getDate((int)$discount->discount_start)->toSql();
-        }
-
+        $start = (int)($discount->discount_start ?? 0);
+        $startSql = $start > 0 ? Factory::getDate($start)->toSql() : null;
         $discountId = (int)($discount->discount_id ?? 0);
-        if ($discountId <= 0) {
-            return null;
-        }
+        $since = null;
 
-        try {
+        if ($discountId > 0) {
             $query = $db->getQuery(true)
                 ->select($db->quoteName('active_since'))
                 ->from($db->quoteName(self::DISCOUNT_TABLE))
                 ->where($db->quoteName('discount_id') . ' = ' . $discountId);
-            $since = $db->setQuery($query)->loadResult();
-        } catch (\Throwable $e) {
-            // Tabeli nie ma po aktualizacji z wersji sprzed 1.2.0 (aktualizacja nie uruchamia install SQL)
-            $this->ensureDiscountTable($db);
-            $since = null;
+            $since = $db->setQuery($query)->loadResult() ?: null;
         }
 
-        if ($since) {
-            return $since;
+        if ($since === null && $startSql === null) {
+            if ($discountId <= 0) {
+                return null;
+            }
+
+            // Rabatu nie zna jeszcze żaden zapis: liczymy od teraz, żeby okno przestało się przesuwać
+            $db->setQuery(
+                'INSERT IGNORE INTO ' . $db->quoteName(self::DISCOUNT_TABLE)
+                . ' (' . $db->quoteName('discount_id') . ', ' . $db->quoteName('active_since') . ')'
+                . ' VALUES (' . $discountId . ', ' . $db->quote($now) . ')'
+            )->execute();
+
+            return $now;
         }
 
-        // shortcut: rabat włączony przed instalacją 1.2.0 nie ma prawdziwej daty; bierzemy pierwsze
-        // wyświetlenie, żeby okno przestało się przesuwać. Dokładnie liczy rabat z datą rozpoczęcia.
-        $now = Factory::getDate()->toSql();
-        $this->insertIntroduction($db, $discountId, $now);
+        if ($since === null) {
+            return $startSql;
+        }
 
-        return $now;
+        return ($startSql !== null && $startSql > $since) ? $startSql : $since;
     }
 
     /**
      * Najwcześniejsze wprowadzenie wśród trwających rabatów: od niego zależy, które
      * wpisy historii są jeszcze potrzebne. Null, gdy żaden rabat nie trwa.
      */
-    private function getEarliestActiveIntroduction($db)
+    private function getEarliestActiveIntroduction($db, $now)
     {
-        $now = time();
+        $this->refreshDiscounts($db, $now);
+
+        $time = Factory::getDate($now)->toUnix();
         $query = $db->getQuery(true)
             ->select($db->quoteName(['discount_id', 'discount_start']))
             ->from($db->quoteName('#__hikashop_discount'))
             ->where($db->quoteName('discount_type') . ' = ' . $db->quote('discount'))
             ->where($db->quoteName('discount_published') . ' = 1')
-            ->where('(' . $db->quoteName('discount_end') . ' = 0 OR ' . $db->quoteName('discount_end') . ' > ' . $now . ')');
+            ->where($db->quoteName('discount_start') . ' <= ' . (int)$time)
+            ->where('(' . $db->quoteName('discount_end') . ' = 0 OR ' . $db->quoteName('discount_end') . ' > ' . (int)$time . ')');
         $discounts = $db->setQuery($query)->loadObjectList();
 
         $earliest = null;
         foreach ($discounts as $discount) {
-            $date = $this->getDiscountIntroduction($discount, $db);
+            $date = $this->getDiscountIntroduction($discount, $db, $now);
             if ($date !== null && ($earliest === null || $date < $earliest)) {
                 $earliest = $date;
             }
@@ -176,101 +271,244 @@ class Omnibus extends CMSPlugin
     }
 
     /**
-     * Zapisuje cenę produktu do historii po aktualizacji
-     * 
-     * UWAGA: Zgodnie z dyrektywą Omnibus zapisujemy tylko regularne ceny produktów,
-     * NIE ceny po zastosowaniu kuponów/rabatów/promocji. Dyrektywa wymaga pokazania
-     * najniższej ceny z ostatnich 30 dni PRZED zastosowaniem obniżki.
+     * Zapis produktu w HikaShopie: do historii trafia cena, po której jest teraz oferowany
      */
     public function onAfterProductUpdate(&$element)
     {
-        $this->savePriceHistory($element);
+        $this->productSaved($element);
     }
 
-    /**
-     * Zapisuje cenę produktu do historii po utworzeniu
-     * 
-     * UWAGA: Zgodnie z dyrektywą Omnibus zapisujemy tylko regularne ceny produktów,
-     * NIE ceny po zastosowaniu kuponów/rabatów/promocji. Dyrektywa wymaga pokazania
-     * najniższej ceny z ostatnich 30 dni PRZED zastosowaniem obniżki.
-     */
     public function onAfterProductCreate(&$element)
     {
-        $this->savePriceHistory($element);
+        $this->productSaved($element);
+    }
+
+    private function productSaved($element)
+    {
+        $this->guarded(function () use ($element) {
+            $product = $element instanceof Event ? $element->getArgument(0) : $element;
+
+            if (!empty($product->product_id)) {
+                $this->syncProducts($this->getDb(), [(int)$product->product_id], Factory::getDate()->toSql());
+            }
+        });
     }
 
     /**
-     * Wspólna funkcja do zapisu historii cen
+     * Cron HikaShopa: zapisuje zmiany cen, które ominęły zapis produktu (import CSV, akcja
+     * masowa „Zaktualizuj wartości”, początek i koniec rabatu z datą).
      */
-    private function savePriceHistory($element)
+    public function onHikashopCronTrigger(&$messages)
     {
-        // Sprawdź czy $element to Event object - jeśli tak, wyciągnij dane
-        if ($element instanceof Event) {
-            $element = $element->getArgument(0);
+        $written = $this->guarded(function () {
+            return $this->syncAllProducts($this->getDb(), Factory::getDate()->toSql());
+        });
+
+        if ($written) {
+            $messages[] = Text::sprintf('PLG_HIKASHOP_OMNIBUS_CRON_REPORT', $written);
         }
 
-        if (empty($element->product_id)) {
-            return;
+        return true;
+    }
+
+    /**
+     * Przelicza wszystkie produkty główne partiami. Zwraca liczbę nowych wpisów historii.
+     */
+    private function syncAllProducts($db, $now)
+    {
+        $this->refreshDiscounts($db, $now);
+
+        $written = 0;
+        $lastId = 0;
+
+        do {
+            $query = $db->getQuery(true)
+                ->select($db->quoteName('product_id'))
+                ->from($db->quoteName('#__hikashop_product'))
+                ->where($db->quoteName('product_type') . ' = ' . $db->quote('main'))
+                ->where($db->quoteName('product_id') . ' > ' . (int)$lastId)
+                ->order($db->quoteName('product_id'));
+            $ids = $db->setQuery($query, 0, self::CHUNK)->loadColumn();
+
+            if ($ids) {
+                $written += $this->syncProducts($db, $ids, $now, false);
+                $lastId = (int)end($ids);
+            }
+        } while (count($ids) === self::CHUNK);
+
+        return $written;
+    }
+
+    /**
+     * Zapisuje do historii cenę, po której produkty są teraz oferowane wszystkim klientom:
+     * cenę regularną albo obniżoną rabatem HikaShopa (także cenę z datą). Wyjaśnienia
+     * Prezesa UOKiK (pkt V.2): cena z wcześniejszej promocji jest punktem odniesienia dla
+     * kolejnych obniżek przez 30 dni, więc ceny promocyjne muszą być w historii.
+     *
+     * Cenę wylicza sam HikaShop (wybór rabatu zależy od kategorii, strefy, wykluczeń),
+     * a onBeforeLoadProductPrice*() zawęża ją do oferty ogólnodostępnej.
+     *
+     * @return int liczba nowych wpisów
+     */
+    private function syncProducts($db, array $ids, $now, $refresh = true)
+    {
+        if ($refresh) {
+            $this->refreshDiscounts($db, $now);
         }
 
-        $db = Factory::getContainer()->get('DatabaseDriver');
-        $productId = (int)$element->product_id;
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        if (!$ids || !$this->loadHikashop()) {
+            return 0;
+        }
 
-        // Pobierz aktualne REGULARNE ceny produktu:
-        // - price_access = 'all'     -> cena ogólnodostępna, nie cena dla wybranej grupy klientów
-        // - price_start_date/end = 0 -> cena stała, nie zaplanowana promocja z zakresem dat
-        // Każda waluta to osobny wiersz - pobieramy wszystkie, bo ceny w różnych walutach
-        // nie są ze sobą porównywalne liczbowo (MIN po samej wartości mieszałoby waluty)
+        $regular = $this->getRegularPrices($db, $ids);
+        if (!$regular) {
+            return 0;
+        }
+
         $query = $db->getQuery(true)
-            ->select($db->quoteName(['price_value', 'price_currency_id']))
+            ->select($db->quoteName(['product_id', 'product_type', 'product_parent_id', 'product_tax_id']))
+            ->from($db->quoteName('#__hikashop_product'))
+            ->where($db->quoteName('product_id') . ' IN (' . implode(',', array_keys($regular)) . ')');
+        $products = $db->setQuery($query)->loadObjectList();
+
+        $currencies = [];
+        foreach ($regular as $byCurrency) {
+            foreach (array_keys($byCurrency) as $currencyId) {
+                $currencies[$currencyId] = (int)$currencyId;
+            }
+        }
+
+        // Strefa sklepu: ta sama, którą HikaShop przyjmuje dla gościa bez adresu
+        $zones = explode(',', (string)hikashop_config()->get('main_tax_zone', 0));
+        $zoneId = (int)reset($zones);
+        $currencyClass = hikashop_get('class.currency');
+        $written = 0;
+
+        foreach ($currencies as $currencyId) {
+            $rows = array_map(static function ($product) {
+                return clone $product;
+            }, $products);
+
+            $this->offerSync = true;
+            try {
+                $currencyClass->getListingPrices($rows, $zoneId, $currencyId, 'unit');
+            } finally {
+                $this->offerSync = false;
+            }
+
+            foreach ($rows as $row) {
+                $productId = (int)$row->product_id;
+                if (!isset($regular[$productId][$currencyId]) || empty($row->prices)) {
+                    continue;
+                }
+
+                $price = reset($row->prices);
+                // Cena przeliczona z innej waluty to nie cena w tej walucie
+                if (!is_object($price) || (int)($price->price_currency_id ?? 0) !== $currencyId
+                    || (!empty($price->price_orig_currency_id) && (int)$price->price_orig_currency_id !== $currencyId)) {
+                    continue;
+                }
+
+                $value = round((float)$price->price_value, 5);
+                $discounted = !empty($row->discount) || $value < $regular[$productId][$currencyId] - 0.000005;
+                $written += $this->addHistoryEntry($db, $productId, $currencyId, $value, $discounted, $now);
+            }
+        }
+
+        return $written;
+    }
+
+    /**
+     * Ceny regularne: ogólnodostępne, bez zakresu dat i bez progu ilościowego.
+     * [product_id][currency_id] => najniższa taka cena
+     */
+    private function getRegularPrices($db, array $ids)
+    {
+        $query = $db->getQuery(true)
+            ->select($db->quoteName(['price_product_id', 'price_currency_id']))
+            ->select('MIN(' . $db->quoteName('price_value') . ') AS ' . $db->quoteName('price_value'))
             ->from($db->quoteName('#__hikashop_price'))
-            ->where($db->quoteName('price_product_id') . ' = ' . $productId)
-            ->where($db->quoteName('price_min_quantity') . ' = 0')
+            ->where($db->quoteName('price_product_id') . ' IN (' . implode(',', $ids) . ')')
+            ->where($db->quoteName('price_min_quantity') . ' IN (0, 1)')
             ->where($db->quoteName('price_access') . ' = ' . $db->quote('all'))
+            ->where($db->quoteName('price_users') . ' = ' . $db->quote(''))
             ->where($db->quoteName('price_start_date') . ' = 0')
-            ->where($db->quoteName('price_end_date') . ' = 0');
+            ->where($db->quoteName('price_end_date') . ' = 0')
+            ->group($db->quoteName(['price_product_id', 'price_currency_id']));
 
-        $db->setQuery($query);
-        $prices = $db->loadObjectList();
-
-        foreach ($prices as $price) {
-            $this->savePriceHistoryEntry($productId, (int)$price->price_currency_id, (float)$price->price_value, $db);
+        $regular = [];
+        foreach ($db->setQuery($query)->loadObjectList() as $row) {
+            $regular[(int)$row->price_product_id][(int)$row->price_currency_id] = (float)$row->price_value;
         }
+
+        return $regular;
     }
 
     /**
-     * Zapisuje pojedynczy wpis historii ceny (dla konkretnej waluty), z deduplikacją
+     * Dopisuje wpis, gdy cena albo jej rodzaj (regularna/obniżona) różni się od ostatniego.
+     *
+     * @return int 1 gdy zapisano, 0 gdy bez zmian
      */
-    private function savePriceHistoryEntry($productId, $currencyId, $priceValue, $db)
+    private function addHistoryEntry($db, $productId, $currencyId, $value, $discounted, $now)
     {
-        // Sprawdź czy ta sama cena (w tej samej walucie) już istnieje w historii
         $query = $db->getQuery(true)
-            ->select($db->quoteName('price'))
-            ->from($db->quoteName('#__hikashop_price_history'))
-            ->where($db->quoteName('product_id') . ' = ' . $productId)
-            ->where($db->quoteName('currency_id') . ' = ' . $currencyId)
-            ->order($db->quoteName('date_added') . ' DESC')
-            ->setLimit(1);
+            ->select($db->quoteName(['price', 'discounted']))
+            ->from($db->quoteName(self::HISTORY_TABLE))
+            ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
+            ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
+            ->order($db->quoteName('date_added') . ' DESC, ' . $db->quoteName('id') . ' DESC');
+        $last = $db->setQuery($query, 0, 1)->loadObject();
 
-        $db->setQuery($query);
-        $lastPrice = $db->loadResult();
+        if ($last && abs((float)$last->price - $value) < 0.000005 && (int)$last->discounted === (int)$discounted) {
+            return 0;
+        }
 
-        // Jeśli cena się nie zmieniła, nie zapisuj duplikatu
-        if ($lastPrice !== null && (float)$lastPrice === $priceValue) {
+        $data = (object)[
+            'product_id' => (int)$productId,
+            'price' => $value,
+            'currency_id' => (int)$currencyId,
+            'discounted' => $discounted ? 1 : 0,
+            'date_added' => $now,
+        ];
+        $db->insertObject(self::HISTORY_TABLE, $data);
+
+        return 1;
+    }
+
+    /**
+     * Przy zapisie historii liczy się oferta dla wszystkich klientów. HikaShop dobiera rabaty
+     * zależnie od tego, kto wywołał zapis (gość, klient, administrator), więc odcinamy rabaty
+     * dla grup i pojedynczych klientów. Bez ograniczeń dostępu (HikaShop Starter) rabat
+     * działa dla wszystkich, więc zostaje.
+     */
+    public function onBeforeLoadProductPriceDiscount(&$filters, $rows = null, $options = null)
+    {
+        if (!$this->offerSync) {
             return;
         }
 
-        // Zapisz cenę do historii
-        $data = (object)[
-            'product_id' => $productId,
-            'price' => $priceValue,
-            'currency_id' => $currencyId,
-            'date_added' => Factory::getDate()->toSql()
-        ];
-
-        $db->insertObject('#__hikashop_price_history', $data);
+        if (hikashop_level(2)) {
+            $filters['omnibus_access'] = "discount_access = 'all'";
+        }
+        $filters['omnibus_user'] = "(discount_user_id = '' OR discount_user_id IS NULL)";
     }
-    
+
+    /**
+     * Tak samo ceny: bez cen dla grup i pojedynczych klientów
+     */
+    public function onBeforeLoadProductPrice(&$filters, $rows = null, $options = null)
+    {
+        if (!$this->offerSync) {
+            return;
+        }
+
+        if (hikashop_level(2)) {
+            $filters['omnibus_access'] = "a.price_access = 'all'";
+        }
+        $filters['omnibus_users'] = "a.price_users = ''";
+    }
+
     /**
      * Wyświetla najniższą cenę PRZED wyświetleniem widoku produktu
      */
@@ -289,23 +527,40 @@ class Omnibus extends CMSPlugin
         // Załaduj CSS z dynamicznymi parametrami (tylko na widoku produktu, gdzie jest używany)
         $this->loadCustomCSS();
 
-        // Sprawdź czy mamy element produktu
-        if (!empty($view->element) && !empty($view->element->product_id)) {
-            $lowestPriceHtml = $this->getLowestPriceHtml($view->element);
-            
-            if ($lowestPriceHtml) {
-                // Wstrzyknij HTML do extraData->rightMiddle (zaraz po cenie)
-                if (!isset($view->element->extraData)) {
-                    $view->element->extraData = new \stdClass();
-                }
-                if (!isset($view->element->extraData->rightMiddle)) {
-                    $view->element->extraData->rightMiddle = [];
-                }
-                $view->element->extraData->rightMiddle[] = $lowestPriceHtml;
+        if (empty($view->element) || empty($view->element->product_id)) {
+            return;
+        }
+
+        $product = $view->element;
+        $lowestPriceHtml = $this->guarded(function () use ($product) {
+            $db = $this->getDb();
+            $now = Factory::getDate()->toSql();
+            $user = $this->getApplication()->getIdentity();
+
+            // Cena mogła się zmienić bez zapisu produktu (import, akcja masowa, początek rabatu
+            // z datą). Zapisujemy tylko przy gościu: rabat HikaShopa może wykluczać grupy
+            // zalogowanego klienta, a historia ma mówić o ofercie dla wszystkich.
+            if (!$user || $user->guest) {
+                $this->syncProducts($db, [(int)$product->product_id], $now);
+            } else {
+                $this->refreshDiscounts($db, $now);
             }
+
+            return $this->getLowestPriceHtml($product, $db, $now);
+        });
+
+        if ($lowestPriceHtml) {
+            // Wstrzyknij HTML do extraData->rightMiddle (zaraz po cenie)
+            if (!isset($view->element->extraData)) {
+                $view->element->extraData = new \stdClass();
+            }
+            if (!isset($view->element->extraData->rightMiddle)) {
+                $view->element->extraData->rightMiddle = [];
+            }
+            $view->element->extraData->rightMiddle[] = $lowestPriceHtml;
         }
     }
-    
+
     /**
      * Ładuje niestandardowy CSS z parametrami z konfiguracji
      */
@@ -331,7 +586,7 @@ class Omnibus extends CMSPlugin
             " . ($strikethrough ? "text-decoration: line-through;" : "") . "
         }
         ";
-        
+
         Factory::getApplication()->getDocument()->addStyleDeclaration($css);
     }
 
@@ -364,7 +619,7 @@ class Omnibus extends CMSPlugin
     {
         $query = $db->getQuery(true)
             ->select('MIN(' . $db->quoteName('price') . ')')
-            ->from($db->quoteName('#__hikashop_price_history'))
+            ->from($db->quoteName(self::HISTORY_TABLE))
             ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
             ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
             ->where($db->quoteName('date_added') . ' >= ' . $db->quote($dateLimit))
@@ -374,7 +629,7 @@ class Omnibus extends CMSPlugin
 
         $query = $db->getQuery(true)
             ->select($db->quoteName('price'))
-            ->from($db->quoteName('#__hikashop_price_history'))
+            ->from($db->quoteName(self::HISTORY_TABLE))
             ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
             ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
             ->where($db->quoteName('date_added') . ' < ' . $db->quote($dateLimit))
@@ -392,12 +647,14 @@ class Omnibus extends CMSPlugin
         }
 
         // Historia zaczyna się po wprowadzeniu obniżki (wtyczkę zainstalowano w trakcie promocji):
-        // najstarszy wpis to cena regularna z chwili instalacji, a rabat HikaShopa jej nie zmienia
+        // najstarszy wpis z ceną regularną to cena z chwili instalacji. Cena obniżona się nie
+        // nadaje, bo to obecna promocja, a nie cena sprzed niej.
         $query = $db->getQuery(true)
             ->select($db->quoteName('price'))
-            ->from($db->quoteName('#__hikashop_price_history'))
+            ->from($db->quoteName(self::HISTORY_TABLE))
             ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
             ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
+            ->where($db->quoteName('discounted') . ' = 0')
             ->order($db->quoteName('date_added') . ' ASC, ' . $db->quoteName('id') . ' ASC')
             ->setLimit(1);
         $first = $db->setQuery($query)->loadResult();
@@ -408,7 +665,7 @@ class Omnibus extends CMSPlugin
     /**
      * Obsługa akcji czyszczenia historii z ustawień wtyczki (com_ajax, group=hikashop).
      *
-     * task=product&product_id=N  - kasuje historię produktu i zapisuje jego cenę bieżącą
+     * task=product&product_id=N  - kasuje historię produktu i zapisuje jego cenę regularną
      *                              jako nowy punkt startowy (dla pomyłek w cenach)
      * task=old                   - kasuje wpisy starsze niż okno "Liczba dni", ale zostawia
      *                              dla każdego produktu i waluty ostatni wpis sprzed okna
@@ -429,83 +686,106 @@ class Omnibus extends CMSPlugin
             return;
         }
 
-        $db = Factory::getContainer()->get('DatabaseDriver');
         $task = $app->getInput()->getCmd('task');
+        $productId = $app->getInput()->getInt('product_id');
 
-        if ($task === 'product') {
-            $productId = $app->getInput()->getInt('product_id');
-
-            if ($productId <= 0) {
-                $event->updateEventResult(['ok' => false, 'message' => Text::_('PLG_HIKASHOP_OMNIBUS_CLEAN_BAD_ID')]);
-                return;
+        $result = $this->guarded(function () use ($task, $productId) {
+            if ($task === 'product') {
+                return $this->resetProductHistory($productId);
+            }
+            if ($task === 'old') {
+                return $this->deleteOldEntries();
             }
 
+            return ['ok' => false, 'message' => Text::_('PLG_HIKASHOP_OMNIBUS_CLEAN_BAD_TASK')];
+        });
+
+        $event->updateEventResult($result ?: ['ok' => false, 'message' => Text::_('PLG_HIKASHOP_OMNIBUS_CLEAN_ERROR')]);
+    }
+
+    /**
+     * Kasuje historię produktu. Nowy punkt startowy to cena regularna, a jeśli trwa obniżka,
+     * zaraz po niej cena obniżona (jak przy instalacji).
+     */
+    private function resetProductHistory($productId)
+    {
+        if ($productId <= 0) {
+            return ['ok' => false, 'message' => Text::_('PLG_HIKASHOP_OMNIBUS_CLEAN_BAD_ID')];
+        }
+
+        $db = $this->getDb();
+        $now = Factory::getDate()->toSql();
+
+        $query = $db->getQuery(true)
+            ->delete($db->quoteName(self::HISTORY_TABLE))
+            ->where($db->quoteName('product_id') . ' = ' . (int)$productId);
+        $db->setQuery($query)->execute();
+        $deleted = $db->getAffectedRows();
+
+        foreach ($this->getRegularPrices($db, [(int)$productId]) as $byCurrency) {
+            foreach ($byCurrency as $currencyId => $value) {
+                $this->addHistoryEntry($db, (int)$productId, (int)$currencyId, round($value, 5), false, $now);
+            }
+        }
+        $this->syncProducts($db, [(int)$productId], $now);
+
+        return [
+            'ok' => true,
+            'message' => Text::sprintf('PLG_HIKASHOP_OMNIBUS_CLEAN_PRODUCT_DONE', $productId, $deleted),
+        ];
+    }
+
+    private function deleteOldEntries()
+    {
+        $db = $this->getDb();
+        $now = Factory::getDate()->toSql();
+        $daysCount = max(1, (int)$this->params->get('days_count', 30));
+
+        // Trwająca obniżka potrzebuje okna sprzed swojego wprowadzenia, więc granica
+        // liczy się od najwcześniejszej z nich, nie od dziś
+        $earliest = $this->getEarliestActiveIntroduction($db, $now);
+        $base = ($earliest !== null && $earliest < $now) ? $earliest : $now;
+        $dateLimit = Factory::getDate($base)->modify('-' . $daysCount . ' days')->toSql();
+
+        $query = $db->getQuery(true)
+            ->select($db->quoteName(['id', 'product_id', 'currency_id']))
+            ->from($db->quoteName(self::HISTORY_TABLE))
+            ->where($db->quoteName('date_added') . ' < ' . $db->quote($dateLimit))
+            ->order($db->quoteName(['product_id', 'currency_id', 'date_added', 'id']));
+        $db->setQuery($query);
+        $rows = $db->loadObjectList();
+
+        // W każdej grupie (produkt + waluta) ostatni wpis sprzed okna zostaje
+        $toDelete = [];
+        $count = count($rows);
+        for ($i = 0; $i < $count; $i++) {
+            $next = $rows[$i + 1] ?? null;
+            $isLastInGroup = !$next
+                || $next->product_id !== $rows[$i]->product_id
+                || $next->currency_id !== $rows[$i]->currency_id;
+
+            if (!$isLastInGroup) {
+                $toDelete[] = (int)$rows[$i]->id;
+            }
+        }
+
+        foreach (array_chunk($toDelete, 500) as $chunk) {
             $query = $db->getQuery(true)
-                ->delete($db->quoteName('#__hikashop_price_history'))
-                ->where($db->quoteName('product_id') . ' = ' . $productId);
+                ->delete($db->quoteName(self::HISTORY_TABLE))
+                ->where($db->quoteName('id') . ' IN (' . implode(',', $chunk) . ')');
             $db->setQuery($query)->execute();
-            $deleted = $db->getAffectedRows();
-
-            $this->savePriceHistory((object)['product_id' => $productId]);
-
-            $event->updateEventResult([
-                'ok' => true,
-                'message' => Text::sprintf('PLG_HIKASHOP_OMNIBUS_CLEAN_PRODUCT_DONE', $productId, $deleted),
-            ]);
-            return;
         }
 
-        if ($task === 'old') {
-            $daysCount = max(1, (int)$this->params->get('days_count', 30));
-            // Trwająca obniżka potrzebuje okna sprzed swojego wprowadzenia, więc granica
-            // liczy się od najwcześniejszej z nich, nie od dziś
-            $earliest = $this->getEarliestActiveIntroduction($db);
-            $base = ($earliest !== null && $earliest < Factory::getDate()->toSql()) ? $earliest : 'now';
-            $dateLimit = Factory::getDate($base)->modify('-' . $daysCount . ' days')->toSql();
-
-            $query = $db->getQuery(true)
-                ->select($db->quoteName(['id', 'product_id', 'currency_id']))
-                ->from($db->quoteName('#__hikashop_price_history'))
-                ->where($db->quoteName('date_added') . ' < ' . $db->quote($dateLimit))
-                ->order($db->quoteName(['product_id', 'currency_id', 'date_added', 'id']));
-            $db->setQuery($query);
-            $rows = $db->loadObjectList();
-
-            // W każdej grupie (produkt + waluta) ostatni wpis sprzed okna zostaje
-            $toDelete = [];
-            $count = count($rows);
-            for ($i = 0; $i < $count; $i++) {
-                $next = $rows[$i + 1] ?? null;
-                $isLastInGroup = !$next
-                    || $next->product_id !== $rows[$i]->product_id
-                    || $next->currency_id !== $rows[$i]->currency_id;
-
-                if (!$isLastInGroup) {
-                    $toDelete[] = (int)$rows[$i]->id;
-                }
-            }
-
-            foreach (array_chunk($toDelete, 500) as $chunk) {
-                $query = $db->getQuery(true)
-                    ->delete($db->quoteName('#__hikashop_price_history'))
-                    ->where($db->quoteName('id') . ' IN (' . implode(',', $chunk) . ')');
-                $db->setQuery($query)->execute();
-            }
-
-            $event->updateEventResult([
-                'ok' => true,
-                'message' => Text::sprintf('PLG_HIKASHOP_OMNIBUS_CLEAN_OLD_DONE', count($toDelete), $daysCount),
-            ]);
-            return;
-        }
-
-        $event->updateEventResult(['ok' => false, 'message' => Text::_('PLG_HIKASHOP_OMNIBUS_CLEAN_BAD_TASK')]);
+        return [
+            'ok' => true,
+            'message' => Text::sprintf('PLG_HIKASHOP_OMNIBUS_CLEAN_OLD_DONE', count($toDelete), $daysCount),
+        ];
     }
 
     /**
      * Pobiera sformatowany HTML z najniższą ceną
      */
-    private function getLowestPriceHtml($product)
+    private function getLowestPriceHtml($product, $db, $now)
     {
         if (empty($product->prices)) {
             return '';
@@ -527,8 +807,6 @@ class Omnibus extends CMSPlugin
         // więc porównujemy tylko wpisy w tej samej walucie (bez mieszania kursów)
         $currencyId = (int)($priceObj->price_currency_id ?? 0);
 
-        $db = Factory::getContainer()->get('DatabaseDriver');
-
         // Pobierz liczbę dni z konfiguracji
         $daysCount = max(1, (int)$this->params->get('days_count', 30));
 
@@ -536,7 +814,7 @@ class Omnibus extends CMSPlugin
         // o cenach), a nie dziś; bez danych o rabacie zostaje dzisiejsza data
         // HikaShop trzyma nałożony rabat przy produkcie, a przy cenie tylko dla cen wariantów
         $discount = $priceObj->discount ?? ($product->discount ?? null);
-        $dateEnd = $this->getDiscountIntroduction($discount, $db) ?? Factory::getDate()->toSql();
+        $dateEnd = $this->getDiscountIntroduction($discount, $db, $now) ?? $now;
         $dateLimit = Factory::getDate($dateEnd)->modify('-' . $daysCount . ' days')->toSql();
 
         $lowestPrice = $this->getLowestHistoryPrice((int)$product->product_id, $currencyId, $dateLimit, $dateEnd, $db);
@@ -568,5 +846,77 @@ class Omnibus extends CMSPlugin
             <span class="omnibus-price-label">' . $text . ': </span>
             <span class="omnibus-price-value">' . $formattedPrice . '</span>
         </div>';
+    }
+
+    private function getDb()
+    {
+        return Factory::getContainer()->get('DatabaseDriver');
+    }
+
+    /**
+     * Ładuje HikaShopa poza jego widokami (np. akcje com_ajax w ustawieniach wtyczki)
+     */
+    private function loadHikashop()
+    {
+        if (function_exists('hikashop_get')) {
+            return true;
+        }
+
+        $helper = JPATH_ADMINISTRATOR . '/components/com_hikashop/helpers/helper.php';
+
+        return is_file($helper) && include_once $helper;
+    }
+
+    /**
+     * Błąd wtyczki nie może zablokować strony produktu ani zapisu w panelu. Tabele sprzed
+     * 1.3.0 (aktualizacja nie uruchamia SQL instalacji) dostają brakujące kolumny, a potem
+     * operacja idzie jeszcze raz.
+     */
+    private function guarded(callable $operation)
+    {
+        try {
+            return $operation();
+        } catch (\Throwable $e) {
+            try {
+                $this->upgradeSchema($this->getDb());
+
+                return $operation();
+            } catch (\Throwable $retry) {
+                Log::add('Omnibus: ' . $retry->getMessage(), Log::WARNING, 'plg_hikashop_omnibus');
+
+                return null;
+            }
+        }
+    }
+
+    /**
+     * Doprowadza tabele do układu z 1.3.0
+     */
+    private function upgradeSchema($db)
+    {
+        $columns = $db->getTableColumns(self::HISTORY_TABLE);
+        if (!isset($columns['discounted'])) {
+            $db->setQuery(
+                'ALTER TABLE ' . $db->quoteName(self::HISTORY_TABLE)
+                . ' ADD ' . $db->quoteName('discounted') . ' tinyint(1) NOT NULL DEFAULT 0 AFTER ' . $db->quoteName('currency_id')
+            )->execute();
+        }
+
+        $db->setQuery(
+            'CREATE TABLE IF NOT EXISTS ' . $db->quoteName(self::DISCOUNT_TABLE) . ' ('
+            . $db->quoteName('discount_id') . ' int(11) NOT NULL, '
+            . $db->quoteName('active_since') . ' datetime NOT NULL, '
+            . $db->quoteName('conditions') . ' char(32) NOT NULL DEFAULT \'\', '
+            . 'PRIMARY KEY (' . $db->quoteName('discount_id') . ')'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 DEFAULT COLLATE=utf8mb4_unicode_ci'
+        )->execute();
+
+        $columns = $db->getTableColumns(self::DISCOUNT_TABLE);
+        if (!isset($columns['conditions'])) {
+            $db->setQuery(
+                'ALTER TABLE ' . $db->quoteName(self::DISCOUNT_TABLE)
+                . ' ADD ' . $db->quoteName('conditions') . ' char(32) NOT NULL DEFAULT \'\''
+            )->execute();
+        }
     }
 }
