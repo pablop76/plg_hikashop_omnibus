@@ -17,7 +17,164 @@ class Omnibus extends CMSPlugin
      * Load the language file on instantiation
      */
     protected $autoloadLanguage = true;
-    
+
+    /**
+     * Chwila włączenia rabatów bez daty rozpoczęcia (HikaShop jej nie przechowuje)
+     */
+    private const DISCOUNT_TABLE = '#__hikashop_omnibus_discount';
+
+    /**
+     * Zapamiętuje włączenie rabatu: art. 4 ust. 2 ustawy o informowaniu o cenach liczy
+     * 30 dni wstecz od wprowadzenia obniżki, a rabat bez daty rozpoczęcia nie ma jej w bazie.
+     */
+    public function onAfterDiscountCreate(&$discount)
+    {
+        $this->recordDiscountState($discount);
+    }
+
+    public function onAfterDiscountUpdate(&$discount)
+    {
+        $this->recordDiscountState($discount);
+    }
+
+    /**
+     * Opublikowany rabat dostaje datę włączenia (tylko pierwszą), wyłączony ją traci:
+     * ponowne włączenie to nowa obniżka.
+     */
+    private function recordDiscountState($discount)
+    {
+        if ($discount instanceof Event) {
+            $discount = $discount->getArgument(0);
+        }
+
+        $db = Factory::getContainer()->get('DatabaseDriver');
+
+        $discountId = (int)($discount->discount_id ?? 0);
+        if ($discountId <= 0 && !empty($discount->discount_code)) {
+            // Przy tworzeniu HikaShop nie wpisuje nowego ID do obiektu (zwraca je tylko z save()),
+            // więc szukamy rabatu po kodzie, który jest wymagany
+            $query = $db->getQuery(true)
+                ->select($db->quoteName('discount_id'))
+                ->from($db->quoteName('#__hikashop_discount'))
+                ->where($db->quoteName('discount_code') . ' = ' . $db->quote((string)$discount->discount_code))
+                ->order($db->quoteName('discount_id') . ' DESC');
+            $discountId = (int)$db->setQuery($query, 0, 1)->loadResult();
+        }
+        if ($discountId <= 0) {
+            return;
+        }
+
+        // Stan po zapisie bierzemy z bazy: obiekt zdarzenia bywa niepełny (tylko zmienione pola)
+        $query = $db->getQuery(true)
+            ->select($db->quoteName(['discount_type', 'discount_published']))
+            ->from($db->quoteName('#__hikashop_discount'))
+            ->where($db->quoteName('discount_id') . ' = ' . $discountId);
+        $row = $db->setQuery($query)->loadObject();
+
+        $this->ensureDiscountTable($db);
+
+        if ($row && $row->discount_type === 'discount' && (int)$row->discount_published === 1) {
+            $this->insertIntroduction($db, $discountId, Factory::getDate()->toSql());
+            return;
+        }
+
+        $query = $db->getQuery(true)
+            ->delete($db->quoteName(self::DISCOUNT_TABLE))
+            ->where($db->quoteName('discount_id') . ' = ' . $discountId);
+        $db->setQuery($query)->execute();
+    }
+
+    private function ensureDiscountTable($db)
+    {
+        $db->setQuery(
+            'CREATE TABLE IF NOT EXISTS ' . $db->quoteName(self::DISCOUNT_TABLE) . ' ('
+            . $db->quoteName('discount_id') . ' int(11) NOT NULL, '
+            . $db->quoteName('active_since') . ' datetime NOT NULL, '
+            . 'PRIMARY KEY (' . $db->quoteName('discount_id') . ')'
+            . ') ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 DEFAULT COLLATE=utf8mb4_unicode_ci'
+        )->execute();
+    }
+
+    /**
+     * IGNORE: istniejąca data zostaje, liczy się pierwsze włączenie
+     */
+    private function insertIntroduction($db, $discountId, $date)
+    {
+        $db->setQuery(
+            'INSERT IGNORE INTO ' . $db->quoteName(self::DISCOUNT_TABLE)
+            . ' (' . $db->quoteName('discount_id') . ', ' . $db->quoteName('active_since') . ')'
+            . ' VALUES (' . (int)$discountId . ', ' . $db->quote($date) . ')'
+        )->execute();
+    }
+
+    /**
+     * Dzień wprowadzenia obniżki (SQL datetime, UTC) albo null, gdy rabatu nie da się ustalić.
+     */
+    private function getDiscountIntroduction($discount, $db)
+    {
+        if (!is_object($discount)) {
+            return null;
+        }
+
+        if (!empty($discount->discount_start)) {
+            return Factory::getDate((int)$discount->discount_start)->toSql();
+        }
+
+        $discountId = (int)($discount->discount_id ?? 0);
+        if ($discountId <= 0) {
+            return null;
+        }
+
+        try {
+            $query = $db->getQuery(true)
+                ->select($db->quoteName('active_since'))
+                ->from($db->quoteName(self::DISCOUNT_TABLE))
+                ->where($db->quoteName('discount_id') . ' = ' . $discountId);
+            $since = $db->setQuery($query)->loadResult();
+        } catch (\Throwable $e) {
+            // Tabeli nie ma po aktualizacji z wersji sprzed 1.2.0 (aktualizacja nie uruchamia install SQL)
+            $this->ensureDiscountTable($db);
+            $since = null;
+        }
+
+        if ($since) {
+            return $since;
+        }
+
+        // shortcut: rabat włączony przed instalacją 1.2.0 nie ma prawdziwej daty; bierzemy pierwsze
+        // wyświetlenie, żeby okno przestało się przesuwać. Dokładnie liczy rabat z datą rozpoczęcia.
+        $now = Factory::getDate()->toSql();
+        $this->insertIntroduction($db, $discountId, $now);
+
+        return $now;
+    }
+
+    /**
+     * Najwcześniejsze wprowadzenie wśród trwających rabatów: od niego zależy, które
+     * wpisy historii są jeszcze potrzebne. Null, gdy żaden rabat nie trwa.
+     */
+    private function getEarliestActiveIntroduction($db)
+    {
+        $now = time();
+        $query = $db->getQuery(true)
+            ->select($db->quoteName(['discount_id', 'discount_start']))
+            ->from($db->quoteName('#__hikashop_discount'))
+            ->where($db->quoteName('discount_type') . ' = ' . $db->quote('discount'))
+            ->where($db->quoteName('discount_published') . ' = 1')
+            ->where('(' . $db->quoteName('discount_end') . ' = 0 OR ' . $db->quoteName('discount_end') . ' > ' . $now . ')');
+        $discounts = $db->setQuery($query)->loadObjectList();
+
+        $earliest = null;
+        foreach ($discounts as $discount) {
+            $date = $this->getDiscountIntroduction($discount, $db);
+            if ($date !== null && ($earliest === null || $date < $earliest)) {
+                $earliest = $date;
+            }
+        }
+
+        return $earliest;
+    }
+
     /**
      * Zapisuje cenę produktu do historii po aktualizacji
      * 
@@ -195,21 +352,23 @@ class Omnibus extends CMSPlugin
     }
 
     /**
-     * Najniższa cena z historii w oknie od $dateLimit (w tej samej walucie).
+     * Najniższa cena z historii w oknie [$dateLimit, $dateEnd) (w tej samej walucie).
      *
      * Historia zapisuje tylko ZMIANY ceny (deduplikacja), więc cena niezmieniona od
      * dawna ma jeden wpis sprzed okna. Ten wpis nadal obowiązywał na początku okna,
      * dlatego doliczamy ostatni wpis sprzed $dateLimit - bez tego produkt ze stałą
-     * ceną starszą niż okno nie dostawałby żadnej informacji.
+     * ceną starszą niż okno nie dostawałby żadnej informacji. Zmiany po $dateEnd
+     * (po wprowadzeniu obniżki) do okna nie należą.
      */
-    private function getLowestHistoryPrice($productId, $currencyId, $dateLimit, $db)
+    private function getLowestHistoryPrice($productId, $currencyId, $dateLimit, $dateEnd, $db)
     {
         $query = $db->getQuery(true)
             ->select('MIN(' . $db->quoteName('price') . ')')
             ->from($db->quoteName('#__hikashop_price_history'))
             ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
             ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
-            ->where($db->quoteName('date_added') . ' >= ' . $db->quote($dateLimit));
+            ->where($db->quoteName('date_added') . ' >= ' . $db->quote($dateLimit))
+            ->where($db->quoteName('date_added') . ' < ' . $db->quote($dateEnd));
         $db->setQuery($query);
         $inWindow = $db->loadResult();
 
@@ -283,7 +442,11 @@ class Omnibus extends CMSPlugin
 
         if ($task === 'old') {
             $daysCount = max(1, (int)$this->params->get('days_count', 30));
-            $dateLimit = Factory::getDate('-' . $daysCount . ' days')->toSql();
+            // Trwająca obniżka potrzebuje okna sprzed swojego wprowadzenia, więc granica
+            // liczy się od najwcześniejszej z nich, nie od dziś
+            $earliest = $this->getEarliestActiveIntroduction($db);
+            $base = ($earliest !== null && $earliest < Factory::getDate()->toSql()) ? $earliest : 'now';
+            $dateLimit = Factory::getDate($base)->modify('-' . $daysCount . ' days')->toSql();
 
             $query = $db->getQuery(true)
                 ->select($db->quoteName(['id', 'product_id', 'currency_id']))
@@ -352,12 +515,16 @@ class Omnibus extends CMSPlugin
         $db = Factory::getContainer()->get('DatabaseDriver');
 
         // Pobierz liczbę dni z konfiguracji
-        $daysCount = (int)$this->params->get('days_count', 30);
+        $daysCount = max(1, (int)$this->params->get('days_count', 30));
 
-        // Oblicz datę wstecz
-        $dateLimit = Factory::getDate('-' . $daysCount . ' days')->toSql();
+        // Okno kończy się w chwili wprowadzenia obniżki (art. 4 ust. 2 ustawy o informowaniu
+        // o cenach), a nie dziś; bez danych o rabacie zostaje dzisiejsza data
+        // HikaShop trzyma nałożony rabat przy produkcie, a przy cenie tylko dla cen wariantów
+        $discount = $priceObj->discount ?? ($product->discount ?? null);
+        $dateEnd = $this->getDiscountIntroduction($discount, $db) ?? Factory::getDate()->toSql();
+        $dateLimit = Factory::getDate($dateEnd)->modify('-' . $daysCount . ' days')->toSql();
 
-        $lowestPrice = $this->getLowestHistoryPrice((int)$product->product_id, $currencyId, $dateLimit, $db);
+        $lowestPrice = $this->getLowestHistoryPrice((int)$product->product_id, $currencyId, $dateLimit, $dateEnd, $db);
 
         if (!$lowestPrice) {
             return '';

@@ -1,13 +1,13 @@
 # Hikashop Omnibus Plugin
 
-Plugin dla Joomla 6 i HikaShop wyświetlający najniższą cenę produktu z ostatnich 30 dni **podczas aktywnych promocji** - pełna zgodność z dyrektywą Omnibus UE.
+Plugin dla Joomla 6 i HikaShop wyświetlający najniższą cenę produktu z 30 dni **przed wprowadzeniem obniżki**, gdy na produkt działa rabat HikaShopa (dyrektywa Omnibus UE, art. 4 ust. 2 ustawy o informowaniu o cenach towarów i usług).
 
 ## ⚖️ Zgodność z dyrektywą Omnibus
 
-Plugin w 100% spełnia wymagania **dyrektywy Omnibus (UE) 2019/2161**:
+Plugin realizuje wymóg **dyrektywy Omnibus (UE) 2019/2161** w zakresie opisanym niżej (patrz „Ograniczenia”):
 
-✅ Informacja o najniższej cenie pojawia się **tylko przy ogłoszeniu obniżki** (rabat, promocja, kupon)  
-✅ Pokazuje najniższą cenę z ostatnich 30 dni **przed zastosowaniem obniżki**  
+✅ Informacja o najniższej cenie pojawia się **tylko przy obniżce** (rabat HikaShopa)  
+✅ Pokazuje najniższą cenę z 30 dni **przed wprowadzeniem obniżki** (okno kończy się w dniu wprowadzenia obniżki, nie dziś)  
 ✅ Automatycznie zapisuje historię cen bazowych produktów (nie ceny po kuponach/rabatach)  
 ✅ Wyraźna prezentacja z przekreśloną ceną bazową  
 
@@ -15,13 +15,13 @@ Plugin w 100% spełnia wymagania **dyrektywy Omnibus (UE) 2019/2161**:
 
 1. **Zapisywanie cen**: Plugin automatycznie zapisuje **regularne ceny produktów** do historii (nie ceny po kuponach/rabatach)
 2. **Wykrywanie promocji**: Sprawdza czy produkt ma aktywny rabat w HikaShop
-3. **Wyświetlanie**: Gdy wykryje promocję, pokazuje najniższą cenę bazową z ostatnich X dni
+3. **Wyświetlanie**: Gdy wykryje promocję, pokazuje najniższą cenę bazową z X dni przed wprowadzeniem obniżki
 4. **Automatyczne ukrywanie**: Gdy promocja się kończy, informacja znika
 
 ## Funkcje
 
 ✅ Automatyczne wykrywanie aktywnych rabatów/promocji HikaShop  
-✅ Wyświetlanie najniższej ceny z ostatnich X dni (konfigurowalne)  
+✅ Wyświetlanie najniższej ceny z X dni przed obniżką (konfigurowalne)  
 ✅ Wsparcie dla cen brutto/netto (z podatkiem)  
 ✅ Pełna konfiguracja w panelu administracyjnym:
 - Liczba dni do sprawdzania historii (domyślnie 30)
@@ -65,8 +65,8 @@ Dostępne opcje:
 
 **Scenariusz:**
 1. Produkt ma cenę bazową 100 zł
-2. W ciągu ostatnich 30 dni cena bazowa wynosiła: 120 zł, 110 zł, 100 zł
-3. Najniższa cena z ostatnich 30 dni to: **100 zł**
+2. W ciągu 30 dni przed obniżką cena bazowa wynosiła: 120 zł, 110 zł, 100 zł
+3. Najniższa cena z 30 dni przed obniżką to: **100 zł**
 
 **Bez promocji:**
 - Plugin **NIE pokazuje** żadnej informacji
@@ -74,7 +74,7 @@ Dostępne opcje:
 **Z promocją -20%:**
 ```
 Cena: 80 zł
-Najniższa cena z ostatnich 30 dni: 100 zł
+Najniższa cena z 30 dni przed obniżką: 100 zł
 ```
 
 ## Zgodność z dyrektywą Omnibus - szczegóły
@@ -82,12 +82,29 @@ Najniższa cena z ostatnich 30 dni: 100 zł
 Plugin zapisuje **tylko regularne ceny produktów**, NIE ceny po zastosowaniu kuponów/rabatów/promocji.  
 
 **Dlaczego?**  
-Zgodnie z dyrektywą Omnibus należy pokazywać najniższą cenę z ostatnich 30 dni **przed zastosowaniem obniżki**. 
+Zgodnie z art. 4 ust. 2 ustawy o informowaniu o cenach towarów i usług obok obniżonej ceny pokazuje się najniższą cenę, która obowiązywała w okresie 30 dni **przed wprowadzeniem obniżki**.
 
 **Przykład:**
 - Jeśli produkt kosztował 200 zł, potem 180 zł, a teraz jest promocja do 150 zł
-- W ogłoszeniu o promocji musisz wskazać: "Najniższa cena z 30 dni: 180 zł"
+- W ogłoszeniu o promocji musisz wskazać: "Najniższa cena z 30 dni przed obniżką: 180 zł"
 - Rabat jest liczony od 180 zł (nie od 200 zł)
+
+### Od kiedy liczą się dni
+
+Okno kończy się w chwili wprowadzenia obniżki, a nie w dniu oglądania strony. Inaczej podwyżka tuż przed promocją mogłaby zniknąć z okna, gdy promocja trwa dłużej.
+
+- **Rabat z datą rozpoczęcia** (pole „Data rozpoczęcia” rabatu w HikaShopie): okno kończy się w tej dacie. To wariant dokładny i zalecany.
+- **Rabat bez daty rozpoczęcia**: HikaShop nie zapisuje, kiedy rabat włączono, więc robi to wtyczka. Przy zapisie opublikowanego rabatu w panelu zapamiętuje chwilę włączenia (tabela `#__hikashop_omnibus_discount`). Wyłączenie rabatu kasuje ten wpis, więc ponowne włączenie liczy się jako nowa obniżka. Zmiana samej wartości rabatu daty nie zmienia.
+- **Rabat włączony przed aktualizacją do 1.2.0** albo przełączony bez zapisu formularza (np. przyciskiem publikacji na liście): wtyczka zapamiętuje pierwsze wyświetlenie produktu z tym rabatem. Prawdziwego początku obniżki nie zna, więc dla takich rabatów ustaw datę rozpoczęcia.
+
+Opis ceny brzmi „Najniższa cena z 30 dni przed obniżką”. Prezes UOKiK ukarał sklep za opis „Najniższa cena przed obniżką”, bo nie wskazywał 30 dni (decyzja DIH-3.99.2024): opis musi jasno mówić, że chodzi o 30 dni przed wprowadzeniem obniżki. Treść napisu zmienisz nadpisaniem językowym klucza `PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_LABEL`.
+
+## Ograniczenia
+
+- Informacja pojawia się tylko na stronie produktu, nie na listach produktów ani w modułach.
+- Reaguje tylko na rabaty HikaShopa. Promocja ustawiona jako osobna cena z zakresem dat albo kupon w koszyku nie wyświetlą informacji.
+- Dla produktów z wariantami bierze pierwszą cenę produktu głównego.
+- Historia zapisuje się przy zapisie produktu przez HikaShop. Cena zmieniona z pominięciem HikaShopa (np. zapytaniem SQL) do niej nie trafi.
 
 ## Struktura plików
 
@@ -125,6 +142,13 @@ Paweł Półtoraczyk (pablop76)
 W razie problemów utwórz [Issue](../../issues) na GitHubie.
 
 ## Changelog
+
+### v1.2.0 (2026-11-21)
+
+- Zmiana: okno najniższej ceny kończy się w chwili wprowadzenia obniżki (data rozpoczęcia rabatu albo zapamiętane włączenie), a nie w dniu oglądania strony; zmiany ceny po wprowadzeniu obniżki do okna nie należą (art. 4 ust. 2 ustawy o informowaniu o cenach)
+- Zmiana: napis „Najniższa cena z %d dni przed obniżką” zamiast „Najniższa cena z ostatnich %d dni”
+- Nowość: tabela `#__hikashop_omnibus_discount` z chwilą włączenia rabatów bez daty rozpoczęcia (przy aktualizacji ze starszej wersji powstaje sama)
+- Poprawka: „Usuń stare wpisy” zachowuje historię potrzebną trwającym obniżkom (granica liczona od najwcześniejszej z nich, nie od dziś)
 
 ### v1.1.0 (2026-09-30)
 

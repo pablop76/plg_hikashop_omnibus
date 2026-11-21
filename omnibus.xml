@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <extension method="upgrade" type="plugin" group="hikashop">
     <name>PLG_HIKASHOP_OMNIBUS</name>
-    <version>1.1.0</version>
+    <version>1.2.0</version>
     <description>PLG_HIKASHOP_OMNIBUS_DESCRIPTION</description>
     <author>Paweł Półtoraczyk</author>
-    <creationDate>30-09-2026</creationDate>
+    <creationDate>21-11-2026</creationDate>
     <copyright>(C) 2024 Open Source Matters, Inc.</copyright>
     <license>GNU General Public License version 2 or later</license>
     <namespace path="src">Pablop76\Plugin\Hikashop\Omnibus</namespace>

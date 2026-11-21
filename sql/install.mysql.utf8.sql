@@ -24,3 +24,11 @@ WHERE `price_min_quantity` = 0
   AND `price_access` = 'all'
   AND `price_start_date` = 0
   AND `price_end_date` = 0;
+
+-- Chwila włączenia rabatów bez daty rozpoczęcia (od 1.2.0). Okno najniższej ceny kończy się
+-- w dniu wprowadzenia obniżki; przy aktualizacji ze starszej wersji tabela powstaje sama.
+CREATE TABLE IF NOT EXISTS `#__hikashop_omnibus_discount` (
+  `discount_id` int(11) NOT NULL,
+  `active_since` datetime NOT NULL,
+  PRIMARY KEY (`discount_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 DEFAULT COLLATE=utf8mb4_unicode_ci;
