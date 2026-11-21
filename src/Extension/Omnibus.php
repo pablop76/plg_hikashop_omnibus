@@ -53,6 +53,8 @@ class Omnibus extends CMSPlugin
 
     private $cssLoaded = false;
 
+    private $moveScriptLoaded = false;
+
     /**
      * Przed zapisem rabatu zapamiętujemy, czy już działał: edycja trwającego rabatu to nie
      * nowa obniżka, a włączenie wyłączonego (albo zakończonego) już tak.
@@ -557,11 +559,13 @@ class Omnibus extends CMSPlugin
             return;
         }
 
-        // Lista produktów (kategoria, wyszukiwanie, moduł): miejsce przy nazwie i cenie
+        // Lista produktów (kategoria, wyszukiwanie, moduł). Szablon ceny listy nie ma miejsca
+        // dla wtyczek, więc napis trafia do najbliższego (afterProductName), a skrypt przenosi
+        // go tuż za cenę: UOKiK wymaga go w najbliższym sąsiedztwie ceny obniżonej.
         if (!empty($view->rows) && is_array($view->rows)) {
             $this->addLowestPrices($view->rows, 'afterProductName', function ($db, $row) {
                 return (int)$row->product_id;
-            });
+            }, true);
         }
     }
 
@@ -569,8 +573,9 @@ class Omnibus extends CMSPlugin
      * Dopisuje informację do extraData->$position każdego produktu z obniżką.
      *
      * @param callable $historyId ($db, $product) => ID produktu, którego historia się liczy
+     * @param bool $moveToPrice skrypt przeniesie napis tuż za cenę produktu
      */
-    private function addLowestPrices(array $products, $position, callable $historyId)
+    private function addLowestPrices(array $products, $position, callable $historyId, $moveToPrice = false)
     {
         $discounted = array_filter($products, function ($product) {
             return is_object($product) && !empty($product->product_id) && $this->hasDiscount($product);
@@ -581,8 +586,11 @@ class Omnibus extends CMSPlugin
         }
 
         $this->loadCustomCSS();
+        if ($moveToPrice) {
+            $this->loadMoveScript();
+        }
 
-        $this->guarded(function () use ($discounted, $position, $historyId) {
+        $this->guarded(function () use ($discounted, $position, $historyId, $moveToPrice) {
             $db = $this->getDb();
             $now = Factory::getDate()->toSql();
             $user = $this->getApplication()->getIdentity();
@@ -610,6 +618,9 @@ class Omnibus extends CMSPlugin
                 $html = $this->getLowestPriceHtml($product, $ids[$key], $db, $now);
                 if ($html === '') {
                     continue;
+                }
+                if ($moveToPrice) {
+                    $html = str_replace('class="hikashop-omnibus-lowest-price"', 'class="hikashop-omnibus-lowest-price" data-omnibus-move="1"', $html);
                 }
 
                 if (!isset($product->extraData) || !is_object($product->extraData)) {
@@ -704,6 +715,46 @@ class Omnibus extends CMSPlugin
         ";
 
         Factory::getApplication()->getDocument()->addStyleDeclaration($css);
+    }
+
+    /**
+     * Przenosi napisy z list tuż za cenę ich produktu: szuka najmniejszego elementu nad napisem,
+     * który zawiera cenę, i wstawia napis zaraz po niej. Gdy w tym elemencie jest kilka cen
+     * (napis bez własnej ceny), zostawia napis na miejscu. Obserwator obsługuje listy
+     * doładowane później (filtry, przewijanie).
+     */
+    private function loadMoveScript()
+    {
+        if ($this->moveScriptLoaded) {
+            return;
+        }
+        $this->moveScriptLoaded = true;
+
+        $js = <<<'JS'
+(function () {
+    function place() {
+        document.querySelectorAll('.hikashop-omnibus-lowest-price[data-omnibus-move]').forEach(function (info) {
+            info.removeAttribute('data-omnibus-move');
+            for (var box = info.parentElement; box && box !== document.body; box = box.parentElement) {
+                var prices = box.querySelectorAll('.hikashop_product_price_full');
+                if (prices.length === 1) {
+                    prices[0].insertAdjacentElement('afterend', info);
+                    return;
+                }
+                if (prices.length > 1) {
+                    return;
+                }
+            }
+        });
+    }
+    document.addEventListener('DOMContentLoaded', function () {
+        place();
+        new MutationObserver(place).observe(document.body, {childList: true, subtree: true});
+    });
+})();
+JS;
+
+        Factory::getApplication()->getDocument()->addScriptDeclaration($js);
     }
 
     /**
