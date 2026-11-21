@@ -15,7 +15,7 @@ Plugin realizuje wymóg **dyrektywy Omnibus (UE) 2019/2161** w zakresie opisanym
 
 ### Jak to działa?
 
-1. **Zapisywanie cen**: wtyczka zapisuje cenę, po której produkt jest oferowany wszystkim klientom: regularną albo obniżoną rabatem HikaShopa. Robi to przy zapisie produktu, w każdym przebiegu crona HikaShopa i przy wyświetleniu produktu niezalogowanemu klientowi.
+1. **Zapisywanie cen**: wtyczka zapisuje cenę, po której produkt jest oferowany wszystkim klientom: regularną albo obniżoną rabatem HikaShopa. Robi to przy zapisie produktu, imporcie CSV, akcji masowej, w każdym przebiegu crona HikaShopa i przy wyświetleniu produktu niezalogowanemu klientowi.
 2. **Wykrywanie promocji**: sprawdza, czy na produkt działa rabat HikaShopa.
 3. **Wyświetlanie**: przy promocji pokazuje najniższą cenę z 30 dni przed wprowadzeniem obniżki.
 4. **Automatyczne ukrywanie**: gdy promocja się kończy, informacja znika.
@@ -67,11 +67,12 @@ Na listach produktów i w modułach napis jest mniejszy i zwykłej grubości, w 
 
 ### Cron HikaShopa
 
-Ustaw cron HikaShopa (**Komponenty → HikaShop → Konfiguracja**, zakładka cron). Bez niego do historii trafią tylko zmiany cen zapisane w formularzu produktu albo widoczne przy wyświetleniu produktu. Cron zapisuje zmiany, o których HikaShop nie powiadamia wtyczek:
+Wtyczka zapisuje zmiany od razu przy zapisie produktu, imporcie CSV, akcji masowej i każdej zmianie rabatu w panelu (formularz, przełącznik publikacji na liście, akcja masowa). Cron HikaShopa (**Komponenty → HikaShop → Konfiguracja**, zakładka cron; tylko wersje płatne: Essential, Business) dopisuje zmiany, o których HikaShop nie powiadamia wtyczek:
 
 - początek i koniec rabatu z datą,
-- ceny zmienione importem CSV albo akcją masową „Zaktualizuj wartości” (HikaShop zapisuje je bezpośrednio w bazie),
-- rabat włączony albo wyłączony przyciskiem na liście rabatów.
+- ceny zmienione wprost w bazie albo przez zewnętrzną integrację.
+
+Bez crona (HikaShop Starter) takie zmiany trafią do historii przy najbliższym wyświetleniu produktu niezalogowanemu klientowi.
 
 ## Przykład działania
 
@@ -108,9 +109,9 @@ Według wyjaśnień Prezesa UOKiK („Informacja o obniżce ceny”, 2023) najni
 Okno kończy się w chwili wprowadzenia obniżki, a nie w dniu oglądania strony. Inaczej podwyżka tuż przed promocją mogłaby zniknąć z okna, gdy promocja trwa dłużej. Termin wprowadzenia zostaje, dopóki promocja trwa na niezmienionych warunkach (pkt V.1).
 
 - **Rabat z datą rozpoczęcia** (pole „Data rozpoczęcia” rabatu w HikaShopie): okno kończy się w tej dacie. To wariant dokładny i zalecany.
-- **Rabat bez daty rozpoczęcia**: HikaShop nie zapisuje, kiedy rabat włączono, więc robi to wtyczka (tabela `#__hikashop_omnibus_discount`). Przy zapisie rabatu w panelu zapamiętuje chwilę włączenia. Wyłączenie albo koniec rabatu kasuje ten wpis, więc ponowne włączenie liczy się jako nowa obniżka.
+- **Rabat bez daty rozpoczęcia**: HikaShop nie zapisuje, kiedy rabat włączono, więc robi to wtyczka (tabela `#__hikashop_omnibus_discount`). Przy zapisie rabatu w panelu (formularz, przełącznik publikacji na liście, akcja masowa) zapamiętuje chwilę włączenia. Wyłączenie albo koniec rabatu kasuje ten wpis, więc ponowne włączenie liczy się jako nowa obniżka.
 - **Zmiana wartości rabatu** (procent, kwota) to nowa obniżka: okno kończy się w chwili zmiany, także przy rabacie z datą rozpoczęcia.
-- **Rabat włączony bez formularza** (przyciskiem publikacji na liście, akcją masową) albo przed aktualizacją do 1.2.0: wtyczka zauważa go przy najbliższym przebiegu crona albo wyświetleniu produktu. Rabat z datą rozpoczęcia liczy się od tej daty, rabat bez daty od chwili zauważenia, więc dla takich rabatów ustaw datę rozpoczęcia.
+- **Rabat zmieniony z pominięciem HikaShopa** (np. wprost w bazie) albo włączony przed aktualizacją do 1.2.0: wtyczka zauważa go przy najbliższym przebiegu crona albo wyświetleniu produktu. Rabat z datą rozpoczęcia liczy się od tej daty, rabat bez daty od chwili zauważenia, więc dla takich rabatów ustaw datę rozpoczęcia.
 
 Opis ceny brzmi „Najniższa cena z 30 dni przed obniżką”. Prezes UOKiK ukarał sklep za opis „Najniższa cena przed obniżką”, bo nie wskazywał 30 dni (decyzja DIH-3.99.2024): opis musi jasno mówić, że chodzi o 30 dni przed wprowadzeniem obniżki. Treść napisu zmienisz nadpisaniem językowym klucza `PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_LABEL`.
 
@@ -120,7 +121,7 @@ Opis ceny brzmi „Najniższa cena z 30 dni przed obniżką”. Prezes UOKiK uka
 - Reaguje tylko na rabaty HikaShopa. Promocja ustawiona jako osobna cena z zakresem dat albo kupon w koszyku nie wyświetlą informacji (cena z zakresem dat trafia jednak do historii).
 - Produkt z wariantami: wariant bez własnej ceny korzysta z historii produktu głównego. Napis jest liczony dla wariantu pokazanego przy wejściu na kartę i nie zmienia się po wyborze innego wariantu, więc przy różnych cenach wariantów może nie pasować.
 - Historia obejmuje ofertę dla wszystkich klientów. Rabaty i ceny tylko dla wybranych grup albo pojedynczych klientów do niej nie trafiają. UOKiK traktuje jednak cenę z promocji dla programu lojalnościowego jako punkt odniesienia dla kolejnych obniżek, więc przy takich promocjach sprawdź napis ręcznie.
-- Cena zmieniona z pominięciem formularza produktu (import, akcja masowa, zapytanie SQL) trafia do historii z datą najbliższego przebiegu crona albo wyświetlenia produktu, a nie z datą zmiany.
+- Cena zmieniona z pominięciem HikaShopa (zapytanie SQL, zewnętrzna integracja zapisująca wprost do bazy) trafia do historii z datą najbliższego przebiegu crona albo wyświetlenia produktu, a nie z datą zmiany. Import CSV i akcje masowe HikaShopa wtyczka zapisuje od razu.
 - Ceny z okresu przed instalacją wtyczki nie są znane: punktem startowym jest cena regularna z dnia instalacji.
 
 ## Struktura plików
@@ -159,6 +160,14 @@ Paweł Półtoraczyk (pablop76)
 W razie problemów utwórz [Issue](../../issues) na GitHubie.
 
 ## Changelog
+
+### v1.3.1 (2026-11-21)
+
+- Nowość: import CSV i akcja masowa na produktach (np. „Zaktualizuj wartości” cen) zapisują zmiany cen w historii od razu, bez czekania na cron (zdarzenia HikaShopa `onAfterProductsImport` i `onAfterMassactionProcess`)
+- Nowość: akcja masowa na rabatach od razu uzgadnia daty wprowadzenia obniżek; rabat włączony akcją masową liczy się od chwili włączenia, a zmiana jego wartości to nowa obniżka
+- Nowość: usunięcie rabatu od razu kasuje jego zapamiętaną datę wprowadzenia (`onAfterDiscountDelete`)
+- Poprawka opisu: przełącznik publikacji na liście rabatów wywołuje te same zdarzenia co formularz, więc włączenie nim rabatu liczy się od chwili włączenia
+- Opis: cron HikaShopa jest tylko w wersjach płatnych (Essential, Business); w wersji Starter zmiany spoza HikaShopa trafiają do historii przy wyświetleniu produktu
 
 ### v1.3.0 (2026-11-21)
 

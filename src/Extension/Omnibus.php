@@ -56,51 +56,94 @@ class Omnibus extends CMSPlugin
     private $moveScriptLoaded = false;
 
     /**
-     * Przed zapisem rabatu zapamiętujemy, czy już działał: edycja trwającego rabatu to nie
-     * nowa obniżka, a włączenie wyłączonego (albo zakończonego) już tak.
+     * Przed zapisem rabatu (formularz, przełącznik publikacji na liście) zapamiętujemy, czy już
+     * działał: edycja trwającego rabatu to nie nowa obniżka, a włączenie wyłączonego
+     * (albo zakończonego) już tak.
      */
     public function onBeforeDiscountUpdate(&$discount, &$do = null)
     {
         $this->guarded(function () use ($discount) {
             $element = $discount instanceof Event ? $discount->getArgument(0) : $discount;
-            $discountId = (int)($element->discount_id ?? 0);
+            $this->rememberLiveDiscounts([(int)($element->discount_id ?? 0)]);
+        });
+    }
 
-            if ($discountId <= 0) {
-                return;
-            }
+    /**
+     * Zapamiętuje, które z rabatów działają (opublikowane, niezakończone) przed zmianą
+     */
+    private function rememberLiveDiscounts(array $ids)
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        if (!$ids) {
+            return;
+        }
 
-            $db = $this->getDb();
-            $query = $db->getQuery(true)
-                ->select($db->quoteName(['discount_type', 'discount_published', 'discount_end']))
-                ->from($db->quoteName('#__hikashop_discount'))
-                ->where($db->quoteName('discount_id') . ' = ' . $discountId);
-            $row = $db->setQuery($query)->loadObject();
+        $db = $this->getDb();
+        $query = $db->getQuery(true)
+            ->select($db->quoteName(['discount_id', 'discount_type', 'discount_published', 'discount_end']))
+            ->from($db->quoteName('#__hikashop_discount'))
+            ->where($db->quoteName('discount_id') . ' IN (' . implode(',', $ids) . ')');
+        $rows = $db->setQuery($query)->loadObjectList('discount_id');
 
+        foreach ($ids as $discountId) {
+            $row = $rows[$discountId] ?? null;
             $this->liveBeforeSave[$discountId] = $row && $row->discount_type === 'discount'
                 && (int)$row->discount_published === 1
                 && ((int)$row->discount_end === 0 || (int)$row->discount_end > time());
+        }
+    }
+
+    /**
+     * Rabaty zapamiętane przed zmianą jako niedziałające: ich włączenie to wprowadzenie
+     * obniżki teraz. Rabatu bez zapamiętanego stanu nie ruszamy (obsłużyło go już zdarzenie
+     * pojedynczego zapisu, np. w trakcie akcji masowej).
+     */
+    private function takeIntroducedDiscounts(array $ids)
+    {
+        $introduced = [];
+        foreach (array_unique(array_map('intval', $ids)) as $discountId) {
+            if (!array_key_exists($discountId, $this->liveBeforeSave)) {
+                continue;
+            }
+            if (!$this->liveBeforeSave[$discountId]) {
+                $introduced[] = $discountId;
+            }
+            unset($this->liveBeforeSave[$discountId]);
+        }
+
+        return $introduced;
+    }
+
+    /**
+     * Usunięty rabat nie potrzebuje daty wprowadzenia
+     */
+    public function onAfterDiscountDelete(&$ids)
+    {
+        $this->guarded(function () {
+            $this->refreshDiscounts($this->getDb(), Factory::getDate()->toSql());
         });
     }
 
     public function onAfterDiscountCreate(&$discount)
     {
         $this->guarded(function () use ($discount) {
-            $this->discountSaved($discount);
+            $this->discountSaved($discount, true);
         });
     }
 
     public function onAfterDiscountUpdate(&$discount)
     {
         $this->guarded(function () use ($discount) {
-            $this->discountSaved($discount);
+            $this->discountSaved($discount, false);
         });
     }
 
     /**
-     * Rabat zapisany w formularzu: włączony teraz dostaje dzisiejszą datę wprowadzenia,
-     * pozostałe zmiany (wartość, wyłączenie) rozstrzyga refreshDiscounts().
+     * Rabat zapisany w panelu (formularz, przełącznik publikacji na liście): nowy albo włączony
+     * teraz dostaje dzisiejszą datę wprowadzenia, pozostałe zmiany (wartość, wyłączenie)
+     * rozstrzyga refreshDiscounts().
      */
-    private function discountSaved($discount)
+    private function discountSaved($discount, $created)
     {
         if ($discount instanceof Event) {
             $discount = $discount->getArgument(0);
@@ -123,7 +166,7 @@ class Omnibus extends CMSPlugin
             return;
         }
 
-        $introduced = empty($this->liveBeforeSave[$discountId]) ? $discountId : 0;
+        $introduced = $created ? [$discountId] : $this->takeIntroducedDiscounts([$discountId]);
         unset($this->liveBeforeSave[$discountId]);
 
         $this->refreshDiscounts($db, Factory::getDate()->toSql(), $introduced);
@@ -137,10 +180,11 @@ class Omnibus extends CMSPlugin
      * obniżka: Polska nie ma wyjątku dla tzw. promocji kroczących, każdą obniżkę liczy się
      * od najniższej ceny z 30 dni przed nią (wyjaśnienia Prezesa UOKiK, pkt III.6 i V.1).
      *
-     * @param int $introducedId rabat włączony właśnie w formularzu (wprowadzony teraz)
+     * @param int[] $introducedIds rabaty włączone właśnie w panelu (wprowadzone teraz)
      */
-    private function refreshDiscounts($db, $now, $introducedId = 0)
+    private function refreshDiscounts($db, $now, array $introducedIds = [])
     {
+        $introducedIds = array_map('intval', $introducedIds);
         $time = Factory::getDate($now)->toUnix();
 
         $query = $db->getQuery(true)
@@ -169,10 +213,10 @@ class Omnibus extends CMSPlugin
             $conditions = $this->discountConditions($discount);
             $row = $known[$discountId] ?? null;
 
-            if ($discountId === (int)$introducedId) {
+            if (in_array($discountId, $introducedIds, true)) {
                 $since = $now;
             } elseif ($row === null) {
-                // Rabat włączony bez formularza (przycisk na liście, akcja masowa) albo przed 1.3.0:
+                // Rabat włączony bez zdarzenia HikaShopa (np. zmiana wprost w bazie) albo przed 1.3.0:
                 // rabat z datą zaczął się w dacie rozpoczęcia, bez daty liczymy od teraz
                 $start = (int)$discount->discount_start;
                 $since = ($start > 0 && $start <= $time) ? Factory::getDate($start)->toSql() : $now;
@@ -306,8 +350,95 @@ class Omnibus extends CMSPlugin
     }
 
     /**
-     * Cron HikaShopa: zapisuje zmiany cen, które ominęły zapis produktu (import CSV, akcja
-     * masowa „Zaktualizuj wartości”, początek i koniec rabatu z datą).
+     * Import CSV zapisuje ceny wprost w bazie, bez zdarzeń zapisu produktu. Po każdej partii
+     * importu HikaShop podaje produkty z już nadanym product_id.
+     */
+    public function onAfterProductsImport(&$view, &$importProducts)
+    {
+        $this->guarded(function () use ($importProducts) {
+            $ids = [];
+            foreach ((array)$importProducts as $product) {
+                if (is_object($product) && !empty($product->product_id)) {
+                    $ids[] = (int)$product->product_id;
+                }
+            }
+
+            $this->syncProductsInChunks($this->getDb(), $ids, Factory::getDate()->toSql());
+        });
+    }
+
+    /**
+     * Przed akcją masową na rabatach zapamiętujemy, które działały (jak przy formularzu)
+     */
+    public function onBeforeMassactionProcess(&$massaction, &$elements, $report = null, &$do = null)
+    {
+        $this->guarded(function () use ($massaction, $elements) {
+            if ($this->massactionTable($massaction) === 'discount') {
+                $this->rememberLiveDiscounts($this->massactionIds($elements, 'discount_id'));
+            }
+        });
+    }
+
+    /**
+     * Akcja masowa (np. „Zaktualizuj wartości” cen) zapisuje wprost w bazie. Po niej
+     * zapisujemy ceny produktów albo uzgadniamy rabaty.
+     */
+    public function onAfterMassactionProcess(&$massaction, &$elements, $report = null)
+    {
+        $this->guarded(function () use ($massaction, $elements) {
+            $table = $this->massactionTable($massaction);
+            $db = $this->getDb();
+            $now = Factory::getDate()->toSql();
+
+            if ($table === 'discount') {
+                $ids = $this->massactionIds($elements, 'discount_id');
+                $this->refreshDiscounts($db, $now, $this->takeIntroducedDiscounts($ids));
+            } elseif ($table === 'product') {
+                $this->syncProductsInChunks($db, $this->massactionIds($elements, 'product_id'), $now);
+            }
+        });
+    }
+
+    private function massactionTable($massaction)
+    {
+        return is_object($massaction) ? strtolower((string)($massaction->massaction_table ?? '')) : '';
+    }
+
+    /**
+     * ID z elementów akcji masowej: obiekty wierszy tabeli albo same liczby
+     */
+    private function massactionIds($elements, $key)
+    {
+        $ids = [];
+        foreach ((array)$elements as $element) {
+            $id = is_object($element) ? ($element->$key ?? 0) : $element;
+            if (is_numeric($id) && (int)$id > 0) {
+                $ids[] = (int)$id;
+            }
+        }
+
+        return $ids;
+    }
+
+    /**
+     * syncProducts() partiami po CHUNK produktów (import i akcje masowe bywają duże)
+     */
+    private function syncProductsInChunks($db, array $ids, $now)
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        $written = 0;
+
+        foreach (array_chunk($ids, self::CHUNK) as $i => $chunk) {
+            $written += $this->syncProducts($db, $chunk, $now, $i === 0);
+        }
+
+        return $written;
+    }
+
+    /**
+     * Cron HikaShopa (tylko wersje płatne): zapisuje zmiany cen, o których HikaShop nie
+     * powiadamia wtyczek (początek i koniec rabatu z datą, cena zmieniona wprost w bazie
+     * albo przez zewnętrzną integrację).
      */
     public function onHikashopCronTrigger(&$messages)
     {
