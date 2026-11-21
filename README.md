@@ -143,6 +143,11 @@ W razie problemów utwórz [Issue](../../issues) na GitHubie.
 
 ## Changelog
 
+### v1.2.1 (2026-11-21)
+
+- Poprawka: przy obniżce wprowadzonej przed instalacją wtyczki (np. rabat z datą rozpoczęcia sprzed instalacji) informacja się nie pokazywała, bo historia cen zaczyna się dopiero od instalacji; teraz brany jest najstarszy zapisany wpis, czyli cena regularna z chwili instalacji
+- Poprawka: ceny zapisywane przy instalacji dostają datę w UTC, jak pozostałe wpisy historii (wcześniej czas serwera bazy)
+
 ### v1.2.0 (2026-11-21)
 
 - Zmiana: okno najniższej ceny kończy się w chwili wprowadzenia obniżki (data rozpoczęcia rabatu albo zapamiętane włączenie), a nie w dniu oglądania strony; zmiany ceny po wprowadzeniu obniżki do okna nie należą (art. 4 ust. 2 ustawy o informowaniu o cenach)

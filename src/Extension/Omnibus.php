@@ -387,7 +387,22 @@ class Omnibus extends CMSPlugin
             return $v !== null;
         });
 
-        return $candidates ? min(array_map('floatval', $candidates)) : null;
+        if ($candidates) {
+            return min(array_map('floatval', $candidates));
+        }
+
+        // Historia zaczyna się po wprowadzeniu obniżki (wtyczkę zainstalowano w trakcie promocji):
+        // najstarszy wpis to cena regularna z chwili instalacji, a rabat HikaShopa jej nie zmienia
+        $query = $db->getQuery(true)
+            ->select($db->quoteName('price'))
+            ->from($db->quoteName('#__hikashop_price_history'))
+            ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
+            ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
+            ->order($db->quoteName('date_added') . ' ASC, ' . $db->quoteName('id') . ' ASC')
+            ->setLimit(1);
+        $first = $db->setQuery($query)->loadResult();
+
+        return $first !== null ? (float)$first : null;
     }
 
     /**

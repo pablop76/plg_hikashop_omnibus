@@ -18,7 +18,7 @@ SELECT
   `price_product_id`,
   `price_value`,
   `price_currency_id`,
-  NOW()
+  UTC_TIMESTAMP()
 FROM `#__hikashop_price`
 WHERE `price_min_quantity` = 0
   AND `price_access` = 'all'
