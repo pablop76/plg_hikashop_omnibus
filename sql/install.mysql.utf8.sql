@@ -2,16 +2,19 @@ CREATE TABLE IF NOT EXISTS `#__hikashop_price_history` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `product_id` int(11) NOT NULL,
   `price` decimal(15,5) NOT NULL,
+  `price_with_tax` decimal(15,5) NULL DEFAULT NULL,
+  `tax_rate` decimal(7,5) NULL DEFAULT NULL,
   `currency_id` int(11) NOT NULL,
   `discounted` tinyint(1) NOT NULL DEFAULT 0,
   `date_added` datetime NOT NULL,
   PRIMARY KEY (`id`),
-  KEY `product_id` (`product_id`),
+  KEY `product_currency_date` (`product_id`, `currency_id`, `date_added`),
   KEY `date_added` (`date_added`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 DEFAULT COLLATE=utf8mb4_unicode_ci;
 
 -- Wypełnij historię aktualnymi cenami regularnymi jako punkt odniesienia: ogólnodostępne,
 -- bez progu ilościowego i bez daty końca - to samo kryterium co Omnibus::getRegularPrices().
+-- Cenę brutto (price_with_tax) te wpisy dostają przy pierwszym zapisie produktu przez wtyczkę.
 -- Obniżki trwające w chwili instalacji dopisze pierwszy przebieg crona albo wyświetlenie produktu.
 INSERT INTO `#__hikashop_price_history` (`product_id`, `price`, `currency_id`, `date_added`)
 SELECT

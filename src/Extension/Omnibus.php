@@ -40,9 +40,19 @@ class Omnibus extends CMSPlugin
     private $offerSync = false;
 
     /**
+     * Wyliczanie ceny z chwili końca rabatu: rabaty rozpoczęte później się nie liczą (unix)
+     */
+    private $offerUntil = null;
+
+    /**
      * Czy rabat był aktywny (opublikowany, niezakończony) przed zapisem w formularzu
      */
     private $liveBeforeSave = [];
+
+    /**
+     * Rabaty usuwane w panelu: zakres i koniec zapamiętane przed usunięciem wiersza
+     */
+    private $deletedDiscounts = [];
 
     /**
      * Na stronie bywa kilka widoków produktów (karta, moduły): rabaty i ceny uzgadniamy raz
@@ -120,7 +130,21 @@ class Omnibus extends CMSPlugin
     }
 
     /**
-     * Usunięty rabat nie potrzebuje daty wprowadzenia
+     * Po usunięciu wiersza rabatu nie byłoby wiadomo, których produktów dotyczył
+     */
+    public function onBeforeDiscountDelete(&$elements, &$do = null)
+    {
+        $this->guarded(function () use ($elements) {
+            $ids = $elements instanceof Event ? $elements->getArgument(0) : $elements;
+            $ids = array_values(array_filter(array_map('intval', (array)$ids)));
+            if ($ids) {
+                $this->deletedDiscounts = $this->loadDiscounts($this->getDb(), $ids) + $this->deletedDiscounts;
+            }
+        });
+    }
+
+    /**
+     * Usunięty rabat to koniec obniżki: cena produktów trafia do historii od razu
      */
     public function onAfterDiscountDelete(&$ids)
     {
@@ -185,15 +209,20 @@ class Omnibus extends CMSPlugin
      * obniżka: Polska nie ma wyjątku dla tzw. promocji kroczących, każdą obniżkę liczy się
      * od najniższej ceny z 30 dni przed nią (wyjaśnienia Prezesa UOKiK, pkt III.6 i V.1).
      *
+     * Początek, koniec i zmiana rabatu od razu zapisują ceny jego produktów w historii (bez
+     * crona). Zalogowany klient ($sync = false) tylko uzgadnia daty: ceny liczone przy nim
+     * zależałyby od jego grup, więc zakończone rabaty czekają na gościa, panel albo cron.
+     *
      * @param int[] $introducedIds rabaty włączone właśnie w panelu (wprowadzone teraz)
      */
-    private function refreshDiscounts($db, $now, array $introducedIds = [])
+    private function refreshDiscounts($db, $now, array $introducedIds = [], $sync = true)
     {
         $introducedIds = array_map('intval', $introducedIds);
         $time = Factory::getDate($now)->toUnix();
 
         $query = $db->getQuery(true)
-            ->select($db->quoteName(['discount_id', 'discount_start', 'discount_flat_amount', 'discount_percent_amount', 'discount_currency_id']))
+            ->select($db->quoteName(['discount_id', 'discount_start', 'discount_flat_amount', 'discount_percent_amount', 'discount_currency_id',
+                'discount_product_id', 'discount_category_id', 'discount_category_childs']))
             ->from($db->quoteName('#__hikashop_discount'))
             ->where($db->quoteName('discount_type') . ' = ' . $db->quote('discount'))
             ->where($db->quoteName('discount_published') . ' = 1')
@@ -206,13 +235,17 @@ class Omnibus extends CMSPlugin
         $known = $db->setQuery($query)->loadObjectList('discount_id');
 
         $gone = array_map('intval', array_diff(array_keys($known), array_keys($live)));
-        if ($gone) {
+        if ($gone && $sync) {
+            // Najpierw historia, potem wpisy: błąd zapisu zostawia rabaty do ponowienia
+            $this->recordDiscountEnds($db, $now, $gone, $known);
+
             $query = $db->getQuery(true)
                 ->delete($db->quoteName(self::DISCOUNT_TABLE))
                 ->where($db->quoteName('discount_id') . ' IN (' . implode(',', $gone) . ')');
             $db->setQuery($query)->execute();
         }
 
+        $started = [];
         foreach ($live as $discountId => $discount) {
             $discountId = (int)$discountId;
             $conditions = $this->discountConditions($discount);
@@ -239,7 +272,160 @@ class Omnibus extends CMSPlugin
                 . ' (' . $db->quoteName('discount_id') . ', ' . $db->quoteName('active_since') . ', ' . $db->quoteName('conditions') . ')'
                 . ' VALUES (' . $discountId . ', ' . $db->quote($since) . ', ' . $db->quote($conditions) . ')'
             )->execute();
+
+            if ($row === null || $since === $now) {
+                $started[] = $discount;
+            }
         }
+
+        if ($started && $sync) {
+            $ids = $this->discountsProductIds($db, $started);
+            $this->syncProductsInChunks($db, $ids ?? $this->allProductIds($db), $now, false);
+        }
+    }
+
+    /**
+     * Koniec rabatu w historii: cena jego produktów tuż po końcu, z datą końca. Rabat
+     * zakończony z datą końca dostaje tę datę także wtedy, gdy wtyczka zauważa go później;
+     * wyłączony albo usunięty kończy się teraz. Produkt objęty kilkoma zakończonymi rabatami
+     * dostaje jeden wpis z najpóźniejszym końcem (bez zawyżania najniższej ceny).
+     */
+    private function recordDiscountEnds($db, $now, array $gone, array $known)
+    {
+        $time = Factory::getDate($now)->toUnix();
+        $rows = $this->loadDiscounts($db, $gone) + $this->deletedDiscounts;
+
+        $ends = [];
+        $everything = null;
+        foreach ($gone as $discountId) {
+            $row = $rows[$discountId] ?? null;
+            unset($this->deletedDiscounts[$discountId]);
+
+            $end = $now;
+            $stop = $row ? (int)$row->discount_end : 0;
+            if ($stop > 0 && $stop <= $time) {
+                $end = max(Factory::getDate($stop)->toSql(), (string)$known[$discountId]->active_since);
+            }
+
+            // Rabat usunięty bez zdarzenia (wprost w bazie): zakres nieznany, więc wszystkie produkty
+            $ids = $row ? $this->discountsProductIds($db, [$row]) : null;
+            if ($ids === null) {
+                $everything = max($everything ?? $end, $end);
+                continue;
+            }
+            foreach ($ids as $productId) {
+                $ends[$productId] = max($ends[$productId] ?? $end, $end);
+            }
+        }
+
+        if ($everything !== null) {
+            foreach ($this->allProductIds($db) as $productId) {
+                $ends[$productId] = max($ends[$productId] ?? $everything, $everything);
+            }
+        }
+
+        $byEnd = [];
+        foreach ($ends as $productId => $end) {
+            $byEnd[$end][] = $productId;
+        }
+        ksort($byEnd);
+
+        foreach ($byEnd as $end => $ids) {
+            $this->offerUntil = Factory::getDate($end)->toUnix();
+            try {
+                $this->syncProductsInChunks($db, $ids, $end, false);
+            } finally {
+                $this->offerUntil = null;
+            }
+        }
+    }
+
+    /**
+     * Wiersze rabatów potrzebne do ustalenia końca i zakresu
+     */
+    private function loadDiscounts($db, array $ids)
+    {
+        $query = $db->getQuery(true)
+            ->select($db->quoteName(['discount_id', 'discount_end', 'discount_product_id', 'discount_category_id', 'discount_category_childs']))
+            ->from($db->quoteName('#__hikashop_discount'))
+            ->where($db->quoteName('discount_id') . ' IN (' . implode(',', array_map('intval', $ids)) . ')');
+
+        return $db->setQuery($query)->loadObjectList('discount_id');
+    }
+
+    /**
+     * Produkty (z wariantami), których dotyczą rabaty, albo null: rabat bez produktów
+     * i kategorii działa na cały sklep. Wykluczenia pomijamy: nadmiarowy produkt nie
+     * dostanie wpisu, bo jego cena się nie zmieniła.
+     */
+    private function discountsProductIds($db, array $discounts)
+    {
+        $products = [];
+        $categories = [];
+        $childs = [];
+        foreach ($discounts as $discount) {
+            $own = $this->idList($discount->discount_product_id ?? '');
+            $cats = $this->idList($discount->discount_category_id ?? '');
+            if (!$own && !$cats) {
+                return null;
+            }
+            $products = array_merge($products, $own);
+            if (!empty($discount->discount_category_childs)) {
+                $childs = array_merge($childs, $cats);
+            } else {
+                $categories = array_merge($categories, $cats);
+            }
+        }
+
+        if ($childs) {
+            $query = $db->getQuery(true)
+                ->select('DISTINCT ' . $db->quoteName('c.category_id'))
+                ->from($db->quoteName('#__hikashop_category', 'p'))
+                ->join('INNER', $db->quoteName('#__hikashop_category', 'c') . ' ON c.category_left >= p.category_left AND c.category_right <= p.category_right')
+                ->where($db->quoteName('p.category_id') . ' IN (' . implode(',', array_unique($childs)) . ')');
+            $categories = array_merge($categories, $db->setQuery($query)->loadColumn());
+        }
+
+        if ($categories) {
+            $query = $db->getQuery(true)
+                ->select('DISTINCT ' . $db->quoteName('product_id'))
+                ->from($db->quoteName('#__hikashop_product_category'))
+                ->where($db->quoteName('category_id') . ' IN (' . implode(',', array_map('intval', array_unique($categories))) . ')');
+            $products = array_merge($products, $db->setQuery($query)->loadColumn());
+        }
+
+        $products = array_values(array_unique(array_map('intval', $products)));
+        if ($products) {
+            $query = $db->getQuery(true)
+                ->select($db->quoteName('product_id'))
+                ->from($db->quoteName('#__hikashop_product'))
+                ->where($db->quoteName('product_type') . ' = ' . $db->quote('variant'))
+                ->where($db->quoteName('product_parent_id') . ' IN (' . implode(',', $products) . ')');
+            $products = array_merge($products, array_map('intval', $db->setQuery($query)->loadColumn()));
+        }
+
+        return $products;
+    }
+
+    /**
+     * ID z pola HikaShopa w rodzaju ",2,15,"
+     */
+    private function idList($value)
+    {
+        return array_values(array_filter(array_map('intval', explode(',', (string)$value))));
+    }
+
+    /**
+     * Wszystkie produkty i warianty sklepu
+     */
+    private function allProductIds($db)
+    {
+        $query = $db->getQuery(true)
+            ->select($db->quoteName('product_id'))
+            ->from($db->quoteName('#__hikashop_product'))
+            ->where($db->quoteName('product_type') . ' IN (' . $db->quote('main') . ',' . $db->quote('variant') . ')');
+
+        return array_map('intval', $db->setQuery($query)->loadColumn());
     }
 
     /**
@@ -428,16 +614,74 @@ class Omnibus extends CMSPlugin
     /**
      * syncProducts() partiami po CHUNK produktów (import i akcje masowe bywają duże)
      */
-    private function syncProductsInChunks($db, array $ids, $now)
+    private function syncProductsInChunks($db, array $ids, $now, $refresh = true)
     {
         $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
         $written = 0;
 
         foreach (array_chunk($ids, self::CHUNK) as $i => $chunk) {
-            $written += $this->syncProducts($db, $chunk, $now, $i === 0);
+            $written += $this->syncProducts($db, $chunk, $now, $refresh && $i === 0);
         }
 
         return $written;
+    }
+
+    /**
+     * Usunięty produkt nie potrzebuje historii. HikaShop podaje tu też jego warianty.
+     */
+    public function onAfterProductDelete(&$elements)
+    {
+        $this->guarded(function () use ($elements) {
+            $ids = $elements instanceof Event ? $elements->getArgument(0) : $elements;
+            $ids = array_values(array_filter(array_map('intval', (array)$ids)));
+            if ($ids) {
+                $db = $this->getDb();
+                $query = $db->getQuery(true)
+                    ->delete($db->quoteName(self::HISTORY_TABLE))
+                    ->where($db->quoteName('product_id') . ' IN (' . implode(',', $ids) . ')');
+                $db->setQuery($query)->execute();
+            }
+        });
+    }
+
+    /**
+     * Zmiana stawki VAT albo reguły podatkowej zmienia ceny brutto wszystkich produktów
+     */
+    public function onAfterTaxCreate(&$element)
+    {
+        $this->taxChanged();
+    }
+
+    public function onAfterTaxUpdate(&$element)
+    {
+        $this->taxChanged();
+    }
+
+    public function onAfterTaxDelete(&$elements)
+    {
+        $this->taxChanged();
+    }
+
+    public function onAfterTaxationCreate(&$element)
+    {
+        $this->taxChanged();
+    }
+
+    public function onAfterTaxationUpdate(&$element)
+    {
+        $this->taxChanged();
+    }
+
+    public function onAfterTaxationDelete(&$elements)
+    {
+        $this->taxChanged();
+    }
+
+    private function taxChanged()
+    {
+        $this->guarded(function () {
+            $this->syncAllProducts($this->getDb(), Factory::getDate()->toSql());
+        });
     }
 
     /**
@@ -459,32 +703,14 @@ class Omnibus extends CMSPlugin
     }
 
     /**
-     * Przelicza wszystkie produkty główne partiami. Zwraca liczbę nowych wpisów historii.
+     * Przelicza wszystkie produkty i warianty (wariant bez własnej ceny syncProducts pomija)
+     * partiami. Zwraca liczbę nowych wpisów historii.
      */
     private function syncAllProducts($db, $now)
     {
         $this->refreshDiscounts($db, $now);
 
-        $written = 0;
-        $lastId = 0;
-
-        do {
-            $query = $db->getQuery(true)
-                ->select($db->quoteName('product_id'))
-                ->from($db->quoteName('#__hikashop_product'))
-                // Warianty też: wariant z własną ceną ma własną historię (bez ceny syncProducts go pomija)
-                ->where($db->quoteName('product_type') . ' IN (' . $db->quote('main') . ',' . $db->quote('variant') . ')')
-                ->where($db->quoteName('product_id') . ' > ' . (int)$lastId)
-                ->order($db->quoteName('product_id'));
-            $ids = $db->setQuery($query, 0, self::CHUNK)->loadColumn();
-
-            if ($ids) {
-                $written += $this->syncProducts($db, $ids, $now, false);
-                $lastId = (int)end($ids);
-            }
-        } while (count($ids) === self::CHUNK);
-
-        return $written;
+        return $this->syncProductsInChunks($db, $this->allProductIds($db), $now, false);
     }
 
     /**
@@ -514,10 +740,15 @@ class Omnibus extends CMSPlugin
             return 0;
         }
 
+        // Wariant bez własnej kategorii podatkowej ma podatek produktu głównego (jak w HikaShopie),
+        // inaczej cena brutto wariantu wyszłaby bez VAT
         $query = $db->getQuery(true)
-            ->select($db->quoteName(['product_id', 'product_type', 'product_parent_id', 'product_tax_id']))
-            ->from($db->quoteName('#__hikashop_product'))
-            ->where($db->quoteName('product_id') . ' IN (' . implode(',', array_keys($regular)) . ')');
+            ->select($db->quoteName(['p.product_id', 'p.product_type', 'p.product_parent_id']))
+            ->select('IF(' . $db->quoteName('p.product_tax_id') . ' > 0, ' . $db->quoteName('p.product_tax_id') . ', '
+                . 'IFNULL(' . $db->quoteName('m.product_tax_id') . ', 0)) AS ' . $db->quoteName('product_tax_id'))
+            ->from($db->quoteName('#__hikashop_product', 'p'))
+            ->join('LEFT', $db->quoteName('#__hikashop_product', 'm') . ' ON ' . $db->quoteName('m.product_id') . ' = ' . $db->quoteName('p.product_parent_id'))
+            ->where($db->quoteName('p.product_id') . ' IN (' . implode(',', array_keys($regular)) . ')');
         $products = $db->setQuery($query)->loadObjectList();
 
         $currencies = [];
@@ -559,9 +790,10 @@ class Omnibus extends CMSPlugin
                 }
 
                 $value = round((float)$price->price_value, 5);
+                $withTax = isset($price->price_value_with_tax) ? round((float)$price->price_value_with_tax, 5) : $value;
                 $regularValue = round($regular[$productId][$currencyId], 5);
                 $discounted = !empty($row->discount) || $value < $regularValue - 0.000005;
-                $written += $this->addHistoryEntry($db, $productId, $currencyId, $value, $discounted, $now, $regularValue);
+                $written += $this->addHistoryEntry($db, $productId, $currencyId, $value, $withTax, $discounted, $now, $regularValue);
             }
         }
 
@@ -596,34 +828,57 @@ class Omnibus extends CMSPlugin
     }
 
     /**
-     * Dopisuje wpis, gdy cena albo jej rodzaj (regularna/obniżona) różni się od ostatniego.
+     * Dopisuje wpis, gdy cena netto, cena brutto (zmiana VAT) albo rodzaj ceny
+     * (regularna/obniżona) różni się od wpisu obowiązującego w chwili $now.
      * Produkt bez historii, który trafia do niej w trakcie obniżki, dostaje najpierw cenę
      * regularną jako punkt startowy (jak przy instalacji): inaczej nie byłoby czego pokazać.
      *
      * @return int liczba zapisanych wpisów
      */
-    private function addHistoryEntry($db, $productId, $currencyId, $value, $discounted, $now, $regularValue = null)
+    private function addHistoryEntry($db, $productId, $currencyId, $value, $withTax, $discounted, $now, $regularValue = null)
     {
+        $ratio = $value > 0 ? $withTax / $value : 1.0;
+
         $query = $db->getQuery(true)
-            ->select($db->quoteName(['price', 'discounted']))
+            ->select($db->quoteName(['price', 'price_with_tax', 'discounted']))
             ->from($db->quoteName(self::HISTORY_TABLE))
             ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
             ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
+            ->where($db->quoteName('date_added') . ' <= ' . $db->quote($now))
             ->order($db->quoteName('date_added') . ' DESC, ' . $db->quoteName('id') . ' DESC');
         $last = $db->setQuery($query, 0, 1)->loadObject();
 
-        if ($last && abs((float)$last->price - $value) < 0.000005 && (int)$last->discounted === (int)$discounted) {
+        // Wpisy sprzed 1.4.0 (i z instalacji) mają tylko cenę netto: dostają brutto według
+        // stawki z chwili pierwszego zapisu, bo wcześniejszej wtyczka nie zna. Potem już się
+        // nie zmieniają.
+        if ($last && $last->price_with_tax === null) {
+            $db->setQuery(
+                'UPDATE ' . $db->quoteName(self::HISTORY_TABLE)
+                . ' SET ' . $db->quoteName('price_with_tax') . ' = ROUND(' . $db->quoteName('price') . ' * ' . sprintf('%.10F', $ratio) . ', 5),'
+                . ' ' . $db->quoteName('tax_rate') . ' = ' . sprintf('%.5F', $ratio - 1)
+                . ' WHERE ' . $db->quoteName('product_id') . ' = ' . (int)$productId
+                . ' AND ' . $db->quoteName('currency_id') . ' = ' . (int)$currencyId
+                . ' AND ' . $db->quoteName('price_with_tax') . ' IS NULL'
+            )->execute();
+            $last->price_with_tax = round((float)$last->price * $ratio, 5);
+        }
+
+        if ($last && abs((float)$last->price - $value) < 0.000005
+            && abs((float)$last->price_with_tax - $withTax) < 0.000005
+            && (int)$last->discounted === (int)$discounted) {
             return 0;
         }
 
         $written = 0;
         if (!$last && $discounted && $regularValue !== null) {
-            $written += $this->addHistoryEntry($db, $productId, $currencyId, $regularValue, false, $now);
+            $written += $this->addHistoryEntry($db, $productId, $currencyId, $regularValue, round($regularValue * $ratio, 5), false, $now);
         }
 
         $data = (object)[
             'product_id' => (int)$productId,
             'price' => $value,
+            'price_with_tax' => $withTax,
+            'tax_rate' => round($ratio - 1, 5),
             'currency_id' => (int)$currencyId,
             'discounted' => $discounted ? 1 : 0,
             'date_added' => $now,
@@ -649,6 +904,11 @@ class Omnibus extends CMSPlugin
             $filters['omnibus_access'] = "discount_access = 'all'";
         }
         $filters['omnibus_user'] = "(discount_user_id = '' OR discount_user_id IS NULL)";
+
+        // Cena z chwili końca rabatu: rabaty rozpoczęte później wtedy jeszcze nie działały
+        if ($this->offerUntil !== null) {
+            $filters['omnibus_until'] = 'discount_start <= ' . (int)$this->offerUntil;
+        }
     }
 
     /**
@@ -815,7 +1075,7 @@ class Omnibus extends CMSPlugin
                 $this->syncedIds += array_fill_keys($toSync, true);
                 $this->discountsRefreshed = true;
             } elseif (!$this->discountsRefreshed) {
-                $this->refreshDiscounts($db, $now);
+                $this->refreshDiscounts($db, $now, [], !$user || $user->guest);
                 $this->discountsRefreshed = true;
             }
 
@@ -1105,10 +1365,14 @@ JS;
      * ceną starszą niż okno nie dostawałby żadnej informacji. Zmiany po $dateEnd
      * (po wprowadzeniu obniżki) do okna nie należą.
      */
-    private function getLowestHistoryPrice($productId, $currencyId, $dateLimit, $dateEnd, $db)
+    private function getLowestHistoryPrice($productId, $currencyId, $dateLimit, $dateEnd, $db, $ratio = 1.0)
     {
+        // Cena brutto z chwili zapisu; wpis bez niej (sprzed 1.4.0, jeszcze nieuzupełniony)
+        // dostaje dzisiejszą proporcję podatku, jak wcześniej
+        $price = 'COALESCE(' . $db->quoteName('price_with_tax') . ', ' . $db->quoteName('price') . ' * ' . sprintf('%.10F', $ratio) . ')';
+
         $query = $db->getQuery(true)
-            ->select('MIN(' . $db->quoteName('price') . ')')
+            ->select('MIN(' . $price . ')')
             ->from($db->quoteName(self::HISTORY_TABLE))
             ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
             ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
@@ -1118,7 +1382,7 @@ JS;
         $inWindow = $db->loadResult();
 
         $query = $db->getQuery(true)
-            ->select($db->quoteName('price'))
+            ->select($price)
             ->from($db->quoteName(self::HISTORY_TABLE))
             ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
             ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
@@ -1140,7 +1404,7 @@ JS;
         // najstarszy wpis z ceną regularną to cena z chwili instalacji. Cena obniżona się nie
         // nadaje, bo to obecna promocja, a nie cena sprzed niej.
         $query = $db->getQuery(true)
-            ->select($db->quoteName('price'))
+            ->select($price)
             ->from($db->quoteName(self::HISTORY_TABLE))
             ->where($db->quoteName('product_id') . ' = ' . (int)$productId)
             ->where($db->quoteName('currency_id') . ' = ' . (int)$currencyId)
@@ -1212,11 +1476,7 @@ JS;
         $db->setQuery($query)->execute();
         $deleted = $db->getAffectedRows();
 
-        foreach ($this->getRegularPrices($db, [(int)$productId]) as $byCurrency) {
-            foreach ($byCurrency as $currencyId => $value) {
-                $this->addHistoryEntry($db, (int)$productId, (int)$currencyId, round($value, 5), false, $now);
-            }
-        }
+        // Pusta historia: przy trwającej obniżce syncProducts zapisze najpierw cenę regularną
         $this->syncProducts($db, [(int)$productId], $now);
 
         return [
@@ -1266,9 +1526,17 @@ JS;
             $db->setQuery($query)->execute();
         }
 
+        // Historia produktów usuniętych z pominięciem HikaShopa (np. wprost w bazie)
+        $db->setQuery(
+            'DELETE h FROM ' . $db->quoteName(self::HISTORY_TABLE) . ' AS h'
+            . ' LEFT JOIN ' . $db->quoteName('#__hikashop_product') . ' AS p ON p.product_id = h.product_id'
+            . ' WHERE p.product_id IS NULL'
+        )->execute();
+        $removed = count($toDelete) + $db->getAffectedRows();
+
         return [
             'ok' => true,
-            'message' => Text::sprintf('PLG_HIKASHOP_OMNIBUS_CLEAN_OLD_DONE', count($toDelete), $daysCount),
+            'message' => Text::sprintf('PLG_HIKASHOP_OMNIBUS_CLEAN_OLD_DONE', $removed, $daysCount),
         ];
     }
 
@@ -1319,21 +1587,16 @@ JS;
             }
         }
 
-        $lowestPrice = $this->getLowestHistoryPrice($historyId, $currencyId, $dateLimit, $dateEnd, $db);
+        // Historia trzyma cenę brutto z chwili zapisu (zmiana VAT nie przelicza starych cen),
+        // a bieżąca cena brutto wyznacza proporcję tylko dla wpisów sprzed 1.4.0
+        $currentShown = (float)($priceObj->price_value_with_tax ?? $priceObj->price_value);
+        $ratio = (float)$priceObj->price_value > 0 ? $currentShown / (float)$priceObj->price_value : 1.0;
 
-        if (!$lowestPrice) {
+        $lowestShown = $this->getLowestHistoryPrice($historyId, $currencyId, $dateLimit, $dateEnd, $db, $ratio);
+
+        if (!$lowestShown) {
             return null;
         }
-
-        // Historia trzyma ceny netto: podatek doliczamy w tej samej proporcji co w bieżącej cenie
-        $ratio = 1.0;
-        if (isset($priceObj->price_value_with_tax, $priceObj->price_value)
-            && $priceObj->price_value > 0
-            && $priceObj->price_value_with_tax != $priceObj->price_value) {
-            $ratio = $priceObj->price_value_with_tax / $priceObj->price_value;
-        }
-        $lowestShown = (float)$lowestPrice * $ratio;
-        $currentShown = (float)$priceObj->price_value * $ratio;
 
         $currencyHelper = hikashop_get('class.currency');
 
@@ -1385,7 +1648,6 @@ JS;
             ->where($db->quoteName('product_id') . ' = ' . $productId);
         $row = $db->setQuery($query)->loadObject();
 
-        $start = null;
         $created = $row ? (int)$row->product_created : 0;
         if ($created > 0) {
             $query = $db->getQuery(true)
@@ -1396,11 +1658,12 @@ JS;
             if ($first) {
                 $created = min($created, Factory::getDate($first)->toUnix());
             }
-
-            $start = Factory::getDate(max($created, (int)$row->product_sale_start))->toSql();
         }
 
-        return $this->offeringStarts[$productId] = $start;
+        // „Początek sprzedaży” liczy się także przy produkcie bez daty utworzenia
+        $start = max($created, $row ? (int)$row->product_sale_start : 0);
+
+        return $this->offeringStarts[$productId] = $start > 0 ? Factory::getDate($start)->toSql() : null;
     }
 
     /**
@@ -1470,7 +1733,8 @@ JS;
     }
 
     /**
-     * Doprowadza tabele do układu z 1.3.0
+     * Doprowadza tabele do układu z 1.4.0. Istniejące wpisy zostają; cenę brutto dostają
+     * przy pierwszym zapisie produktu (addHistoryEntry).
      */
     private function upgradeSchema($db)
     {
@@ -1479,6 +1743,25 @@ JS;
             $db->setQuery(
                 'ALTER TABLE ' . $db->quoteName(self::HISTORY_TABLE)
                 . ' ADD ' . $db->quoteName('discounted') . ' tinyint(1) NOT NULL DEFAULT 0 AFTER ' . $db->quoteName('currency_id')
+            )->execute();
+        }
+        if (!isset($columns['price_with_tax'])) {
+            $db->setQuery(
+                'ALTER TABLE ' . $db->quoteName(self::HISTORY_TABLE)
+                . ' ADD ' . $db->quoteName('price_with_tax') . ' decimal(15,5) NULL DEFAULT NULL AFTER ' . $db->quoteName('price') . ','
+                . ' ADD ' . $db->quoteName('tax_rate') . ' decimal(7,5) NULL DEFAULT NULL AFTER ' . $db->quoteName('price_with_tax')
+            )->execute();
+        }
+
+        // Okno i ostatni wpis sprzed okna szukają po produkcie, walucie i dacie; sam indeks
+        // produktu jest wtedy zbędny
+        $keys = array_column($db->setQuery('SHOW INDEX FROM ' . $db->quoteName(self::HISTORY_TABLE))->loadAssocList(), 'Key_name');
+        if (!in_array('product_currency_date', $keys, true)) {
+            $db->setQuery(
+                'ALTER TABLE ' . $db->quoteName(self::HISTORY_TABLE)
+                . ' ADD KEY ' . $db->quoteName('product_currency_date')
+                . ' (' . $db->quoteName('product_id') . ', ' . $db->quoteName('currency_id') . ', ' . $db->quoteName('date_added') . ')'
+                . (in_array('product_id', $keys, true) ? ', DROP KEY ' . $db->quoteName('product_id') : '')
             )->execute();
         }
 

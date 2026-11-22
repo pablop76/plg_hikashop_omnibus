@@ -18,7 +18,7 @@ Plugin realizuje wymóg **dyrektywy Omnibus (UE) 2019/2161** w zakresie opisanym
 
 ### Jak to działa?
 
-1. **Zapisywanie cen**: wtyczka zapisuje cenę, po której produkt jest oferowany wszystkim klientom: regularną albo obniżoną rabatem HikaShopa. Robi to przy zapisie produktu, imporcie CSV, akcji masowej, w każdym przebiegu crona HikaShopa i przy wyświetleniu produktu niezalogowanemu klientowi.
+1. **Zapisywanie cen**: wtyczka zapisuje cenę, po której produkt jest oferowany wszystkim klientom: regularną albo obniżoną rabatem HikaShopa, netto i brutto (z VAT obowiązującym w chwili zapisu). Robi to przy zapisie produktu, imporcie CSV, akcji masowej, przy każdej zmianie rabatu i stawki VAT w panelu, w każdym przebiegu crona HikaShopa i przy wyświetleniu produktu niezalogowanemu klientowi.
 2. **Wykrywanie promocji**: sprawdza, czy na produkt działa rabat HikaShopa.
 3. **Wyświetlanie**: przy promocji pokazuje najniższą cenę z 30 dni przed wprowadzeniem obniżki.
 4. **Automatyczne ukrywanie**: gdy promocja się kończy, informacja znika.
@@ -71,12 +71,11 @@ Na listach produktów i w modułach napis jest mniejszy i zwykłej grubości, w 
 
 ### Cron HikaShopa
 
-Wtyczka zapisuje zmiany od razu przy zapisie produktu, imporcie CSV, akcji masowej i każdej zmianie rabatu w panelu (formularz, przełącznik publikacji na liście, akcja masowa). Cron HikaShopa (**Komponenty → HikaShop → Konfiguracja**, zakładka cron; tylko wersje płatne: Essential, Business) dopisuje zmiany, o których HikaShop nie powiadamia wtyczek:
+Cron nie jest potrzebny do poprawnego napisu. Wtyczka zapisuje zmiany od razu przy zapisie produktu, imporcie CSV, akcji masowej, zmianie stawki albo reguły VAT i każdej zmianie rabatu w panelu (formularz, przełącznik publikacji na liście, akcja masowa, usunięcie). Wyłączenie albo usunięcie rabatu od razu zapisuje cenę jego produktów po końcu promocji.
 
-- początek i koniec rabatu z datą,
-- ceny zmienione wprost w bazie albo przez zewnętrzną integrację.
+Rabat, który skończył się z datą końca, wtyczka zauważa przy najbliższym wyświetleniu produktu z rabatem niezalogowanemu klientowi, zapisie w panelu albo przebiegu crona. Cenę po końcu zapisuje wtedy z datą końca rabatu, nie z dniem zauważenia, więc okres promocji w historii się zgadza.
 
-Bez crona (HikaShop Starter) takie zmiany trafią do historii przy najbliższym wyświetleniu produktu niezalogowanemu klientowi.
+Cron HikaShopa (**Komponenty → HikaShop → Konfiguracja**, zakładka cron; tylko wersje płatne: Essential, Business) jest pomocniczy: zapisuje ceny zmienione wprost w bazie albo przez zewnętrzną integrację bez czekania na wyświetlenie produktu.
 
 ## Przykład działania
 
@@ -121,6 +120,8 @@ Okno kończy się w chwili wprowadzenia obniżki, a nie w dniu oglądania strony
 
 Towar oferowany krócej niż 30 dni przed obniżką dostaje napis „Najniższa cena od wprowadzenia towaru” z najniższą ceną od początku sprzedaży (art. 4 ust. 3 ustawy, pkt III.3 wyjaśnień). Początek sprzedaży to data utworzenia produktu w HikaShopie, a gdy później zaczyna się sprzedaż („Początek sprzedaży” produktu), ta data. Import CSV nadpisuje datę utworzenia, więc wcześniejszy wpis w historii ma pierwszeństwo.
 
+Produkt utworzony wcześniej, a wystawiony do sprzedaży później: HikaShop nie zapisuje daty publikacji, więc ustaw „Początek sprzedaży”. Bez tego wtyczka liczy oferowanie od daty utworzenia.
+
 Rabat obowiązujący od pierwszego dnia sprzedaży nie jest obniżką, tylko ceną wprowadzającą (UOKiK: cena „nadchodząca”, pkt III.3). Taki produkt napisu nie dostaje, a przy włączonym „Dopasuj rabat HikaShopa” wtyczka ukrywa też procent i cenę sprzed rabatu HikaShopa.
 
 ### Rabat HikaShopa przy cenie
@@ -135,6 +136,10 @@ Przykład: produkt 100 zł był dwa tygodnie temu w promocji za 90 zł, teraz ma
 
 Wtyczka zmienia tylko prezentację rabatu. Cena sprzedaży, czyli ile klient płaci, zostaje taka, jak policzył ją HikaShop.
 
+### VAT
+
+Historia trzyma cenę netto, cenę brutto i stawkę VAT z chwili zapisu. Napis pokazuje cenę brutto, którą klient wtedy płacił, więc zmiana stawki VAT nie przelicza starszych cen. Wpisy sprzed 1.4.0 mają tylko cenę netto: przy pierwszym zapisie produktu po aktualizacji dostają cenę brutto według stawki obowiązującej w tym momencie (wcześniejszej stawki wtyczka nie zna) i potem już się nie zmieniają.
+
 Przy wyłączonej opcji wtyczka nie zmienia rabatu HikaShopa. Rabat od pierwszego dnia sprzedaży zostaje wtedy z przekreśloną ceną, której towar nigdy nie miał, i bez napisu, więc takiego rabatu nie ustawiaj albo włącz opcję.
 
 Opis ceny brzmi „Najniższa cena z 30 dni przed obniżką”. Prezes UOKiK ukarał sklep za opis „Najniższa cena przed obniżką”, bo nie wskazywał 30 dni (decyzja DIH-3.99.2024): opis musi jasno mówić, że chodzi o 30 dni przed wprowadzeniem obniżki. Treść napisu zmienisz nadpisaniem językowym klucza `PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_LABEL`.
@@ -146,7 +151,8 @@ Opis ceny brzmi „Najniższa cena z 30 dni przed obniżką”. Prezes UOKiK uka
 - Reaguje tylko na rabaty HikaShopa. Promocja ustawiona jako osobna cena z zakresem dat albo kupon w koszyku nie wyświetlą informacji (cena z zakresem dat trafia jednak do historii).
 - Produkt z wariantami: wariant bez własnej ceny korzysta z historii produktu głównego, wariant z własną ceną ma własną historię. Napis zmienia się po wyborze wariantu (zdarzenie HikaShopa `hkAfterUpdateVariant`), więc wymaga JavaScriptu.
 - Historia obejmuje ofertę dla wszystkich klientów. Rabaty i ceny tylko dla wybranych grup albo pojedynczych klientów do niej nie trafiają. UOKiK traktuje jednak cenę z promocji dla programu lojalnościowego jako punkt odniesienia dla kolejnych obniżek, więc przy takich promocjach sprawdź napis ręcznie.
-- Cena zmieniona z pominięciem HikaShopa (zapytanie SQL, zewnętrzna integracja zapisująca wprost do bazy) trafia do historii z datą najbliższego przebiegu crona albo wyświetlenia produktu, a nie z datą zmiany. Import CSV i akcje masowe HikaShopa wtyczka zapisuje od razu.
+- Cena zmieniona z pominięciem HikaShopa (zapytanie SQL, zewnętrzna integracja zapisująca wprost do bazy) trafia do historii z datą najbliższego przebiegu crona albo wyświetlenia produktu, a nie z datą zmiany. To samo dotyczy rabatu wyłączonego wprost w bazie: koniec promocji ma datę zauważenia. Import CSV i akcje masowe HikaShopa wtyczka zapisuje od razu.
+- Usunięcie produktu w HikaShopie kasuje jego historię (z wariantami). Historię produktów usuniętych wprost w bazie kasuje przycisk „Wyczyść stare wpisy” w ustawieniach wtyczki.
 - Ceny z okresu przed instalacją wtyczki nie są znane: punktem startowym jest cena regularna z dnia instalacji.
 
 ## Struktura plików
@@ -194,6 +200,12 @@ W razie problemów utwórz [Issue](../../issues) na GitHubie.
 - Nowość: napis na stronie koszyka pod ceną za sztukę
 - Nowość: moduł koszyka nie ogłasza obniżki (przy „Dopasuj rabat HikaShopa” procent i cena sprzed rabatu ukryte), bo nie ma w nim miejsca na napis
 - Poprawka: cron HikaShopa zapisuje też warianty z własną ceną (wcześniej tylko produkty główne, a warianty trafiały do historii dopiero przy zapisie albo wyświetleniu)
+- Poprawka: koniec promocji trafia do historii bez crona. Wyłączenie i usunięcie rabatu w panelu zapisuje cenę od razu, a koniec z datą zapisuje się z datą końca przy najbliższym działaniu wtyczki; wcześniej bez crona najniższa cena przy kolejnej promocji bywała zaniżona
+- Poprawka: historia zapisuje cenę brutto i stawkę VAT z chwili zapisu; zmiana VAT nie przelicza już starszych cen, a zmiana stawki albo reguły VAT w panelu od razu zapisuje nowe ceny brutto
+- Poprawka: usunięcie produktu kasuje jego historię (z wariantami); „Wyczyść stare wpisy” usuwa też historię produktów usuniętych wprost w bazie
+- Poprawka: „Początek sprzedaży” liczy się także przy produkcie bez daty utworzenia
+- Wydajność: indeks złożony (produkt, waluta, data) zamiast indeksu samego produktu; przy produkcie z długą historią zapytania wtyczki są kilkadziesiąt razy szybsze
+- Baza: kolumny `price_with_tax` i `tax_rate` oraz indeks `product_currency_date` w `#__hikashop_price_history` (przy aktualizacji dodawane automatycznie, istniejące wpisy zostają)
 
 ### v1.3.1 (2026-11-21)
 
