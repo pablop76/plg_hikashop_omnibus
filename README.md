@@ -133,12 +133,16 @@ HikaShop pokazuje (opcja „Wyświetl zniżkę”) procent albo kwotę rabatu i 
 
 Przykład: produkt 100 zł był dwa tygodnie temu w promocji za 90 zł, teraz ma rabat −20% (80 zł). HikaShop pokazałby „−20%” i przekreślone 100 zł, wtyczka pokazuje „−11%” i napis z ceną 90 zł. Dopasowanie działa w przeglądarce (JavaScript) i obejmuje kartę produktu, listy, moduły i stronę koszyka.
 
+Wtyczka zmienia tylko prezentację rabatu. Cena sprzedaży, czyli ile klient płaci, zostaje taka, jak policzył ją HikaShop.
+
+Przy wyłączonej opcji wtyczka nie zmienia rabatu HikaShopa. Rabat od pierwszego dnia sprzedaży zostaje wtedy z przekreśloną ceną, której towar nigdy nie miał, i bez napisu, więc takiego rabatu nie ustawiaj albo włącz opcję.
+
 Opis ceny brzmi „Najniższa cena z 30 dni przed obniżką”. Prezes UOKiK ukarał sklep za opis „Najniższa cena przed obniżką”, bo nie wskazywał 30 dni (decyzja DIH-3.99.2024): opis musi jasno mówić, że chodzi o 30 dni przed wprowadzeniem obniżki. Treść napisu zmienisz nadpisaniem językowym klucza `PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_LABEL`.
 
 ## Ograniczenia
 
 - Na listach produktów i w modułach szablon ceny HikaShopa nie ma miejsca dla wtyczek. Napis trafia więc do miejsca `afterProductName` szablonu listy, a skrypt przenosi go tuż pod cenę produktu (bez JavaScriptu zostaje w `afterProductName`). Układy bez tego miejsca (np. `listing_img`) wymagają nadpisania szablonu. Lista albo moduł bez cen napisu nie dostaje.
-- Na stronie koszyka napis stoi pod ceną za sztukę. Moduł koszyka (mini koszyk) napisu nie dostaje, więc jeśli pokazuje rabat, ustaw w nim „Wyświetl zniżkę” na „Nie”.
+- Na stronie koszyka napis stoi pod ceną za sztukę. Moduł koszyka (mini koszyk) nie ma miejsca na napis, więc przy włączonym „Dopasuj rabat HikaShopa” wtyczka ukrywa w nim procent i cenę sprzed rabatu: moduł pokazuje cenę do zapłaty, ale nie ogłasza obniżki. Przy wyłączonej opcji ustaw w module „Wyświetl zniżkę” na „Nie”.
 - Reaguje tylko na rabaty HikaShopa. Promocja ustawiona jako osobna cena z zakresem dat albo kupon w koszyku nie wyświetlą informacji (cena z zakresem dat trafia jednak do historii).
 - Produkt z wariantami: wariant bez własnej ceny korzysta z historii produktu głównego, wariant z własną ceną ma własną historię. Napis zmienia się po wyborze wariantu (zdarzenie HikaShopa `hkAfterUpdateVariant`), więc wymaga JavaScriptu.
 - Historia obejmuje ofertę dla wszystkich klientów. Rabaty i ceny tylko dla wybranych grup albo pojedynczych klientów do niej nie trafiają. UOKiK traktuje jednak cenę z promocji dla programu lojalnościowego jako punkt odniesienia dla kolejnych obniżek, więc przy takich promocjach sprawdź napis ręcznie.
@@ -188,6 +192,8 @@ W razie problemów utwórz [Issue](../../issues) na GitHubie.
 - Nowość: opcja „Dopasuj rabat HikaShopa” (domyślnie włączona): procent albo kwota rabatu HikaShopa liczone od najniższej ceny, przekreślona cena sprzed rabatu bez opisu ukryta, procent ukryty, gdy cena nie jest niższa od najniższej (pkt VI)
 - Nowość: napis na karcie produktu zmienia się po wyborze wariantu; wariant z własną ceną ma własną historię
 - Nowość: napis na stronie koszyka pod ceną za sztukę
+- Nowość: moduł koszyka nie ogłasza obniżki (przy „Dopasuj rabat HikaShopa” procent i cena sprzed rabatu ukryte), bo nie ma w nim miejsca na napis
+- Poprawka: cron HikaShopa zapisuje też warianty z własną ceną (wcześniej tylko produkty główne, a warianty trafiały do historii dopiero przy zapisie albo wyświetleniu)
 
 ### v1.3.1 (2026-11-21)
 

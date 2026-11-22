@@ -472,7 +472,8 @@ class Omnibus extends CMSPlugin
             $query = $db->getQuery(true)
                 ->select($db->quoteName('product_id'))
                 ->from($db->quoteName('#__hikashop_product'))
-                ->where($db->quoteName('product_type') . ' = ' . $db->quote('main'))
+                // Warianty też: wariant z własną ceną ma własną historię (bez ceny syncProducts go pomija)
+                ->where($db->quoteName('product_type') . ' IN (' . $db->quote('main') . ',' . $db->quote('variant') . ')')
                 ->where($db->quoteName('product_id') . ' > ' . (int)$lastId)
                 ->order($db->quoteName('product_id'));
             $ids = $db->setQuery($query, 0, self::CHUNK)->loadColumn();
@@ -683,6 +684,14 @@ class Omnibus extends CMSPlugin
         if ($name === 'cart') {
             if (!empty($view->cart->products) && is_array($view->cart->products) && $this->showsPrices($view)) {
                 $this->addListInfos($view->cart->products, 'cart', true);
+            }
+            return;
+        }
+
+        // Moduł koszyka nie ma miejsca na napis: przy dopasowaniu nie ogłasza obniżki wcale (CSS)
+        if ($name === 'product' && $view->getLayout() === 'cart') {
+            if ((int)$this->params->get('adjust_discount', 1)) {
+                $this->loadCustomCSS();
             }
             return;
         }
@@ -939,6 +948,15 @@ class Omnibus extends CMSPlugin
             white-space: nowrap;
         }
         ";
+
+        if ((int)$this->params->get('adjust_discount', 1)) {
+            $css .= "
+        .hikashop_cart .hikashop_product_price_before_discount,
+        .hikashop_cart .hikashop_product_discount {
+            display: none;
+        }
+        ";
+        }
 
         Factory::getApplication()->getDocument()->addStyleDeclaration($css);
     }
