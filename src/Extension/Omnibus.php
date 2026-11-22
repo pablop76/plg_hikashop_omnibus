@@ -53,7 +53,12 @@ class Omnibus extends CMSPlugin
 
     private $cssLoaded = false;
 
-    private $moveScriptLoaded = false;
+    private $scriptLoaded = false;
+
+    /**
+     * Początek oferowania produktów (pamięć na czas żądania)
+     */
+    private $offeringStarts = [];
 
     /**
      * Przed zapisem rabatu (formularz, przełącznik publikacji na liście) zapamiętujemy, czy już
@@ -661,8 +666,9 @@ class Omnibus extends CMSPlugin
     }
 
     /**
-     * Informacja o najniższej cenie na karcie produktu i na listach produktów (także w modułach
-     * HikaShopa): UOKiK wymaga jej wszędzie, gdzie widać obniżkę konkretnego produktu.
+     * Informacja o najniższej cenie na karcie produktu, na listach produktów (także w modułach
+     * HikaShopa) i na stronie koszyka: UOKiK wymaga jej wszędzie, gdzie widać obniżkę
+     * konkretnego produktu, w najbliższym sąsiedztwie ceny.
      */
     public function onHikashopBeforeDisplayView(&$view)
     {
@@ -671,42 +677,104 @@ class Omnibus extends CMSPlugin
             return;
         }
 
-        // Sprawdź czy to widok produktu
-        if (empty($view->getName()) || $view->getName() != 'product') {
+        $name = (string)$view->getName();
+
+        // Strona koszyka (i listy życzeń): napis przy produkcie, skrypt przenosi go pod cenę
+        if ($name === 'cart') {
+            if (!empty($view->cart->products) && is_array($view->cart->products) && $this->showsPrices($view)) {
+                $this->addListInfos($view->cart->products, 'cart', true);
+            }
             return;
         }
 
         // Moduł albo lista bez cen nie ogłasza obniżki, więc i informacji nie potrzebuje
-        if (!$this->showsPrices($view)) {
+        if ($name !== 'product' || !$this->showsPrices($view)) {
             return;
         }
 
         // Karta produktu: miejsce tuż po cenie
         if (!empty($view->element) && !empty($view->element->product_id)) {
-            $product = $view->element;
-            $this->addLowestPrices([$product], 'rightMiddle', function ($db) use ($product) {
-                return $this->historyProductId($db, $product);
-            });
+            $this->addProductPageInfo($view->element);
             return;
         }
 
         // Lista produktów (kategoria, wyszukiwanie, moduł). Szablon ceny listy nie ma miejsca
         // dla wtyczek, więc napis trafia do najbliższego (afterProductName), a skrypt przenosi
-        // go tuż za cenę: UOKiK wymaga go w najbliższym sąsiedztwie ceny obniżonej.
+        // go tuż za cenę.
         if (!empty($view->rows) && is_array($view->rows)) {
-            $this->addLowestPrices($view->rows, 'afterProductName', function ($db, $row) {
-                return (int)$row->product_id;
-            }, true);
+            $this->addListInfos($view->rows, 'afterProductName', false);
         }
     }
 
     /**
-     * Dopisuje informację do extraData->$position każdego produktu z obniżką.
+     * Napisy dla listy produktów albo koszyka
      *
-     * @param callable $historyId ($db, $product) => ID produktu, którego historia się liczy
-     * @param bool $moveToPrice skrypt przeniesie napis tuż za cenę produktu
+     * @param bool $firstPrice w wierszu są dwie ceny (koszyk: za sztukę i razem), napis idzie
+     *                         pod pierwszą
      */
-    private function addLowestPrices(array $products, $position, callable $historyId, $moveToPrice = false)
+    private function addListInfos(array $products, $position, $firstPrice)
+    {
+        $this->addInfos($products, function ($product, $info) use ($position, $firstPrice) {
+            $attrs = ['data-omnibus-move' => '1'];
+            if ($firstPrice) {
+                $attrs['data-omnibus-first'] = '1';
+            }
+
+            $this->appendExtraData($product, $position, $this->renderLowestPrice($info, 'hikashop-omnibus-lowest-price--list', $attrs));
+            $this->loadScript();
+        });
+    }
+
+    /**
+     * Karta produktu. Przy wariantach HikaShop pokazuje wariant domyślny, a ceny pozostałych
+     * trzyma w ukrytych blokach i kopiuje je pod cenę po wyborze. Napisy wariantów czekają
+     * w ukrytym bloku, skrypt podmienia napis po zdarzeniu hkAfterUpdateVariant.
+     */
+    private function addProductPageInfo($element)
+    {
+        $products = [$element];
+        if (!empty($element->variants) && is_array($element->variants)) {
+            foreach ($element->variants as $variant) {
+                if (is_object($variant) && !empty($variant->product_id)) {
+                    $products[] = $variant;
+                }
+            }
+        }
+
+        $main = '';
+        $variants = [];
+        $this->addInfos($products, function ($product, $info) use ($element, &$main, &$variants) {
+            if ($product === $element) {
+                $main = $this->renderLowestPrice($info, '', ['data-omnibus-price' => 'hikashop_product_price_main']);
+            } else {
+                $variants[(int)$product->product_id] = $this->renderLowestPrice($info);
+            }
+        });
+
+        if ($main === '' && !$variants) {
+            return;
+        }
+
+        $html = '<div id="hikashop_omnibus_main">' . $main . '</div>';
+        if ($variants) {
+            $html .= '<div hidden>';
+            foreach ($variants as $productId => $variantHtml) {
+                $html .= '<div data-omnibus-variant-of="' . $productId . '">' . $variantHtml . '</div>';
+            }
+            $html .= '</div>';
+        }
+
+        $this->appendExtraData($element, 'rightMiddle', $html);
+        $this->loadScript();
+    }
+
+    /**
+     * Liczy informację dla każdego produktu z obniżką i przekazuje ją do $use.
+     * Przy gościu najpierw uzupełnia historię (cena mogła się zmienić bez zapisu produktu).
+     *
+     * @param callable $use ($product, array $info)
+     */
+    private function addInfos(array $products, callable $use)
     {
         $discounted = array_filter($products, function ($product) {
             return is_object($product) && !empty($product->product_id) && $this->hasDiscount($product);
@@ -717,18 +785,15 @@ class Omnibus extends CMSPlugin
         }
 
         $this->loadCustomCSS();
-        if ($moveToPrice) {
-            $this->loadMoveScript();
-        }
 
-        $this->guarded(function () use ($discounted, $position, $historyId, $moveToPrice) {
+        $this->guarded(function () use ($discounted, $use) {
             $db = $this->getDb();
             $now = Factory::getDate()->toSql();
             $user = $this->getApplication()->getIdentity();
 
             $ids = [];
             foreach ($discounted as $key => $product) {
-                $ids[$key] = (int)$historyId($db, $product);
+                $ids[$key] = $this->historyProductId($db, $product);
             }
 
             // Cena mogła się zmienić bez zapisu produktu (import, akcja masowa, początek rabatu
@@ -746,27 +811,23 @@ class Omnibus extends CMSPlugin
             }
 
             foreach ($discounted as $key => $product) {
-                $html = $this->getLowestPriceHtml($product, $ids[$key], $db, $now);
-                if ($html === '') {
-                    continue;
+                $info = $this->getLowestPriceInfo($product, $ids[$key], $db, $now);
+                if ($info !== null) {
+                    $use($product, $info);
                 }
-                if ($moveToPrice) {
-                    $html = str_replace(
-                        'class="hikashop-omnibus-lowest-price"',
-                        'class="hikashop-omnibus-lowest-price hikashop-omnibus-lowest-price--list" data-omnibus-move="1"',
-                        $html
-                    );
-                }
-
-                if (!isset($product->extraData) || !is_object($product->extraData)) {
-                    $product->extraData = new \stdClass();
-                }
-                if (!isset($product->extraData->{$position}) || !is_array($product->extraData->{$position})) {
-                    $product->extraData->{$position} = [];
-                }
-                $product->extraData->{$position}[] = $html;
             }
         });
+    }
+
+    private function appendExtraData($product, $position, $html)
+    {
+        if (!isset($product->extraData) || !is_object($product->extraData)) {
+            $product->extraData = new \stdClass();
+        }
+        if (!isset($product->extraData->{$position}) || !is_array($product->extraData->{$position})) {
+            $product->extraData->{$position} = [];
+        }
+        $product->extraData->{$position}[] = $html;
     }
 
     /**
@@ -788,28 +849,45 @@ class Omnibus extends CMSPlugin
     }
 
     /**
+     * Cena, którą widzi klient. W koszyku ceny są za całą ilość, a cena za sztukę siedzi
+     * w unit_price.
+     */
+    private function displayedPrice($product)
+    {
+        if (empty($product->prices) || !is_array($product->prices)) {
+            return null;
+        }
+
+        $price = reset($product->prices);
+        if (is_object($price) && isset($price->unit_price) && is_object($price->unit_price)) {
+            $price = $price->unit_price;
+        }
+
+        return is_object($price) ? $price : null;
+    }
+
+    /**
      * Czy na produkt działa rabat HikaShopa (wtedy HikaShop podaje cenę sprzed rabatu)
      */
     private function hasDiscount($product)
     {
-        if (empty($product->prices) || !is_array($product->prices)) {
-            return false;
-        }
+        $price = $this->displayedPrice($product);
 
-        $price = reset($product->prices);
-
-        return is_object($price) && isset($price->price_value_without_discount)
+        return $price !== null && isset($price->price_value_without_discount)
             && $price->price_value_without_discount > $price->price_value;
     }
 
     /**
-     * Czyja historia: przy produkcie z wariantami HikaShop podaje na karcie wariant domyślny,
-     * a produkt główny w ->main. Wariant bez własnej ceny ma cenę (i historię) produktu głównego.
+     * Czyja historia: wariant bez własnej ceny ma cenę (i historię) produktu głównego.
+     * Na karcie produkt główny jest w ->main, w koszyku wariant zna product_parent_id.
      */
     private function historyProductId($db, $product)
     {
         $productId = (int)$product->product_id;
         $mainId = (int)($product->main->product_id ?? 0);
+        if ($mainId <= 0 && ($product->product_type ?? '') === 'variant') {
+            $mainId = (int)($product->product_parent_id ?? 0);
+        }
 
         if ($mainId > 0 && $mainId !== $productId && !$this->getRegularPrices($db, [$productId])) {
             return $mainId;
@@ -866,43 +944,117 @@ class Omnibus extends CMSPlugin
     }
 
     /**
-     * Przenosi napisy z list tuż za cenę ich produktu: szuka najmniejszego elementu nad napisem,
-     * który zawiera cenę, i wstawia napis zaraz po niej. Gdy w tym elemencie jest kilka cen
-     * (napis bez własnej ceny), zostawia napis na miejscu. Obserwator obsługuje listy
-     * doładowane później (filtry, przewijanie).
+     * Skrypt napisów:
+     * - listy, moduły i koszyk: napis z miejsca dla wtyczek trafia tuż za cenę produktu
+     *   (szuka najmniejszego elementu nad napisem z ceną; kilka cen = napis bez własnej ceny,
+     *   zostaje na miejscu, chyba że to koszyk z ceną za sztukę i razem),
+     * - rabat HikaShopa przy cenie: procent albo kwota liczone od najniższej ceny
+     *   (data-omnibus-saving), niepodpisana cena sprzed rabatu znika,
+     * - warianty: ukryte ceny wariantów dostają poprawiony rabat od razu (HikaShop kopiuje je
+     *   przy wyborze), a napis pod ceną zmienia się po zdarzeniu hkAfterUpdateVariant.
+     * Obserwator obsługuje treści doładowane później (filtry, przewijanie, koszyk AJAX).
      */
-    private function loadMoveScript()
+    private function loadScript()
     {
-        if ($this->moveScriptLoaded) {
+        if ($this->scriptLoaded) {
             return;
         }
-        $this->moveScriptLoaded = true;
+        $this->scriptLoaded = true;
 
         $js = <<<'JS'
 (function () {
-    function place() {
-        document.querySelectorAll('.hikashop-omnibus-lowest-price[data-omnibus-move]').forEach(function (info) {
-            info.removeAttribute('data-omnibus-move');
-            for (var box = info.parentElement; box && box !== document.body; box = box.parentElement) {
-                var prices = box.querySelectorAll('.hikashop_product_price_full');
-                if (prices.length === 1) {
-                    prices[0].insertAdjacentElement('afterend', info);
-                    // Krój kwoty ceny, nie kontenera karty (w kartach bywa krój nagłówków)
-                    var amount = prices[0].querySelector('.hikashop_product_price');
-                    if (amount) {
-                        info.style.fontFamily = getComputedStyle(amount).fontFamily;
-                    }
-                    return;
-                }
-                if (prices.length > 1) {
-                    return;
-                }
+    function adjust(block, info) {
+        if (!block || !info || !info.hasAttribute('data-omnibus-saving')) {
+            return;
+        }
+        var saving = info.getAttribute('data-omnibus-saving');
+        block.querySelectorAll('.hikashop_product_price_before_discount').forEach(function (el) {
+            el.style.display = 'none';
+        });
+        block.querySelectorAll('.hikashop_product_discount').forEach(function (el) {
+            var amount = el.querySelector('.hikashop_product_discount_amount');
+            if (saving && amount) {
+                amount.textContent = saving;
+            } else {
+                el.style.display = 'none';
             }
         });
     }
+
+    // Wybór wariantu (np. "_23") -> ID produktu wariantu
+    function variantIds() {
+        var map = {};
+        document.querySelectorAll('[id^="hikashop_product_id_"]').forEach(function (el) {
+            var input = el.querySelector('input[name="product_id"]');
+            var key = el.id.substring('hikashop_product_id'.length);
+            if (input && key !== '_main') {
+                map[key] = input.value;
+            }
+        });
+        return map;
+    }
+
+    function place() {
+        document.querySelectorAll('.hikashop-omnibus-lowest-price[data-omnibus-move]').forEach(function (info) {
+            info.removeAttribute('data-omnibus-move');
+            var first = info.hasAttribute('data-omnibus-first');
+            for (var box = info.parentElement; box && box !== document.body; box = box.parentElement) {
+                var prices = box.querySelectorAll('.hikashop_product_price_full');
+                if (!prices.length) {
+                    continue;
+                }
+                if (prices.length > 1 && !first) {
+                    return;
+                }
+                prices[0].insertAdjacentElement('afterend', info);
+                // Krój kwoty ceny, nie kontenera karty (w kartach bywa krój nagłówków)
+                var amount = prices[0].querySelector('.hikashop_product_price');
+                if (amount) {
+                    info.style.fontFamily = getComputedStyle(amount).fontFamily;
+                }
+                prices.forEach(function (price) {
+                    adjust(price, info);
+                });
+                return;
+            }
+        });
+
+        document.querySelectorAll('.hikashop-omnibus-lowest-price[data-omnibus-price]').forEach(function (info) {
+            adjust(document.getElementById(info.getAttribute('data-omnibus-price')), info);
+            info.removeAttribute('data-omnibus-price');
+        });
+
+        var holders = document.querySelectorAll('[data-omnibus-variant-of]:not([data-omnibus-done])');
+        if (holders.length) {
+            var ids = variantIds();
+            holders.forEach(function (holder) {
+                holder.setAttribute('data-omnibus-done', '1');
+                var info = holder.querySelector('.hikashop-omnibus-lowest-price');
+                Object.keys(ids).forEach(function (key) {
+                    if (ids[key] === holder.getAttribute('data-omnibus-variant-of')) {
+                        adjust(document.getElementById('hikashop_product_price' + key), info);
+                    }
+                });
+            });
+        }
+    }
+
+    function selectVariant(params) {
+        var main = document.getElementById('hikashop_omnibus_main');
+        if (!main || !params || !params.selection) {
+            return;
+        }
+        var id = variantIds()[params.selection];
+        var holder = id ? document.querySelector('[data-omnibus-variant-of="' + id + '"]') : null;
+        main.innerHTML = holder ? holder.innerHTML : '';
+    }
+
     document.addEventListener('DOMContentLoaded', function () {
         place();
         new MutationObserver(place).observe(document.body, {childList: true, subtree: true});
+        if (window.Oby && window.Oby.registerAjax) {
+            window.Oby.registerAjax('hkAfterUpdateVariant', selectVariant);
+        }
     });
 })();
 JS;
@@ -1103,17 +1255,19 @@ JS;
     }
 
     /**
-     * Pobiera sformatowany HTML z najniższą ceną
+     * Informacja o najniższej cenie dla produktu z obniżką albo null:
+     * ['label' => opis, 'value' => sformatowana najniższa cena,
+     *  'saving' => wielkość obniżki od najniższej ceny (null, gdy wyłączone dopasowanie)]
      */
-    private function getLowestPriceHtml($product, $historyId, $db, $now)
+    private function getLowestPriceInfo($product, $historyId, $db, $now)
     {
         // KLUCZOWE: Zgodnie z dyrektywą Omnibus informacja ma się pokazywać
         // TYLKO przy ogłoszeniu obniżki (rabat HikaShopa)
         if (!$this->hasDiscount($product)) {
-            return '';
+            return null;
         }
 
-        $priceObj = reset($product->prices);
+        $priceObj = $this->displayedPrice($product);
 
         // Waluta aktualnie wyświetlanej ceny - historia jest zapisywana per waluta,
         // więc porównujemy tylko wpisy w tej samej walucie (bez mieszania kursów)
@@ -1128,35 +1282,131 @@ JS;
         $discount = $priceObj->discount ?? ($product->discount ?? null);
         $dateEnd = $this->getDiscountIntroduction($discount, $db, $now) ?? $now;
         $dateLimit = Factory::getDate($dateEnd)->modify('-' . $daysCount . ' days')->toSql();
+        $label = Text::sprintf('PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_LABEL', $daysCount);
+
+        // Towar oferowany krócej niż okno (art. 4 ust. 3, wyjaśnienia UOKiK pkt III.3): najniższa
+        // cena od wprowadzenia towaru. Rabat od pierwszego dnia sprzedaży nie jest obniżką
+        // (UOKiK: cena nadchodząca), więc wtedy informacji nie ma z czego policzyć.
+        $offered = $this->getOfferingStart($db, $historyId);
+        if ($offered !== null) {
+            if ($offered >= $dateEnd) {
+                // Bez napisu, ale z dopasowaniem rabatu HikaShop nie pokaże tu oznak obniżki
+                return (int)$this->params->get('adjust_discount', 1)
+                    ? ['label' => '', 'value' => '', 'saving' => '']
+                    : null;
+            }
+            if ($offered > $dateLimit) {
+                $dateLimit = $offered;
+                $label = Text::_('PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_NEW_LABEL');
+            }
+        }
 
         $lowestPrice = $this->getLowestHistoryPrice($historyId, $currencyId, $dateLimit, $dateEnd, $db);
 
         if (!$lowestPrice) {
-            return '';
+            return null;
         }
 
-        $priceToShow = (float)$lowestPrice;
-
-        // Jeśli mamy cenę z podatkiem różną od ceny netto, zastosuj ten sam współczynnik
-        // do najniższej ceny historycznej (która jest zapisana netto)
+        // Historia trzyma ceny netto: podatek doliczamy w tej samej proporcji co w bieżącej cenie
+        $ratio = 1.0;
         if (isset($priceObj->price_value_with_tax, $priceObj->price_value)
             && $priceObj->price_value > 0
             && $priceObj->price_value_with_tax != $priceObj->price_value) {
-            $taxMultiplier = $priceObj->price_value_with_tax / $priceObj->price_value;
-            $priceToShow *= $taxMultiplier;
+            $ratio = $priceObj->price_value_with_tax / $priceObj->price_value;
+        }
+        $lowestShown = (float)$lowestPrice * $ratio;
+        $currentShown = (float)$priceObj->price_value * $ratio;
+
+        $currencyHelper = hikashop_get('class.currency');
+
+        return [
+            'label' => $label,
+            'value' => $currencyHelper->format($lowestShown, $currencyId),
+            'saving' => (int)$this->params->get('adjust_discount', 1)
+                ? $this->savingText($lowestShown, $currentShown, $discount, $currencyId, $currencyHelper)
+                : null,
+        ];
+    }
+
+    /**
+     * Wielkość obniżki liczona od najniższej ceny (UOKiK pkt V.2: nie od ceny regularnej),
+     * w tej samej postaci co rabat HikaShopa: kwota przy rabacie kwotowym, inaczej procent
+     * zaokrąglony w dół, żeby nie zawyżać. Pusty tekst: cena nie jest niższa od najniższej.
+     */
+    private function savingText($lowest, $current, $discount, $currencyId, $currencyHelper)
+    {
+        $diff = $lowest - $current;
+        if ($lowest <= 0 || $diff < 0.005) {
+            return '';
         }
 
-        // Formatuj cenę używając funkcji HikaShop
-        $currencyHelper = hikashop_get('class.currency');
-        $formattedPrice = $currencyHelper->format($priceToShow, $currencyId);
+        if (is_object($discount) && (float)($discount->discount_flat_amount ?? 0) != 0.0) {
+            return $currencyHelper->format(-$diff, $currencyId);
+        }
 
-        // Przygotuj tekst z tłumaczeniem (liczba dni jest wstrzykiwana do etykiety)
-        $text = Text::sprintf('PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_LABEL', $daysCount);
+        $percent = (int)floor($diff / $lowest * 100 + 1e-9);
 
-        // Zwróć sformatowany HTML
-        return '<div class="hikashop-omnibus-lowest-price">
-            <span class="omnibus-price-label">' . $text . ': </span>
-            <span class="omnibus-price-value">' . $formattedPrice . '</span>
+        return $percent > 0 ? '-' . $percent . '%' : '';
+    }
+
+    /**
+     * Początek oferowania produktu (SQL datetime, UTC) albo null, gdy nieznany: data
+     * utworzenia, a gdy później zaczyna się sprzedaż, jej początek. Import HikaShopa nadpisuje
+     * datę utworzenia, więc wcześniejszy wpis historii ma pierwszeństwo.
+     */
+    private function getOfferingStart($db, $productId)
+    {
+        $productId = (int)$productId;
+        if (array_key_exists($productId, $this->offeringStarts)) {
+            return $this->offeringStarts[$productId];
+        }
+
+        $query = $db->getQuery(true)
+            ->select($db->quoteName(['product_created', 'product_sale_start']))
+            ->from($db->quoteName('#__hikashop_product'))
+            ->where($db->quoteName('product_id') . ' = ' . $productId);
+        $row = $db->setQuery($query)->loadObject();
+
+        $start = null;
+        $created = $row ? (int)$row->product_created : 0;
+        if ($created > 0) {
+            $query = $db->getQuery(true)
+                ->select('MIN(' . $db->quoteName('date_added') . ')')
+                ->from($db->quoteName(self::HISTORY_TABLE))
+                ->where($db->quoteName('product_id') . ' = ' . $productId);
+            $first = $db->setQuery($query)->loadResult();
+            if ($first) {
+                $created = min($created, Factory::getDate($first)->toUnix());
+            }
+
+            $start = Factory::getDate(max($created, (int)$row->product_sale_start))->toSql();
+        }
+
+        return $this->offeringStarts[$productId] = $start;
+    }
+
+    /**
+     * HTML napisu
+     */
+    private function renderLowestPrice(array $info, $class = '', array $attrs = [])
+    {
+        if ($info['saving'] !== null) {
+            $attrs['data-omnibus-saving'] = $info['saving'];
+        }
+
+        $html = '<div class="hikashop-omnibus-lowest-price' . ($class !== '' ? ' ' . $class : '') . '"';
+        foreach ($attrs as $name => $value) {
+            $html .= ' ' . $name . '="' . htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8') . '"';
+        }
+
+        // Sam znacznik dla skryptu (rabat od pierwszego dnia sprzedaży): bez tekstu
+        if ($info['label'] === '') {
+            return $html . ' hidden></div>';
+        }
+
+        return $html . '>
+            <span class="omnibus-price-label">' . $info['label'] . ': </span>
+            <span class="omnibus-price-value">' . $info['value'] . '</span>
         </div>';
     }
 

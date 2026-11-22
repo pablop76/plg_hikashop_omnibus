@@ -10,8 +10,11 @@ Plugin realizuje wymóg **dyrektywy Omnibus (UE) 2019/2161** w zakresie opisanym
 ✅ Pokazuje najniższą cenę z 30 dni **przed wprowadzeniem obniżki** (okno kończy się w dniu wprowadzenia obniżki, nie dziś)  
 ✅ Zapisuje historię cen, po których produkt był oferowany wszystkim klientom: regularnych i obniżonych rabatem HikaShopa, więc cena z poprzedniej promocji też się liczy  
 ✅ Zwiększenie albo zmniejszenie rabatu traktuje jako nową obniżkę (tzw. promocje kroczące)  
-✅ Informacja na karcie produktu, na listach produktów i w modułach HikaShopa  
-✅ Wyraźna prezentacja z przekreśloną ceną bazową  
+✅ Informacja na karcie produktu, na listach produktów, w modułach HikaShopa i na stronie koszyka  
+✅ Towar oferowany krócej niż 30 dni dostaje „Najniższą cenę od wprowadzenia towaru”  
+✅ Procent albo kwota rabatu HikaShopa liczone od najniższej ceny, nie od ceny regularnej  
+✅ Napis zmienia się po wyborze wariantu  
+✅ Wyraźna prezentacja z przekreśloną najniższą ceną  
 
 ### Jak to działa?
 
@@ -61,6 +64,7 @@ Dostępne opcje:
 - **Rozmiar czcionki** - rozmiar czcionki wyświetlanej ceny (np. 0.85em, 14px)
 - **Kolor tekstu** - kolor tekstu (#666666)
 - **Przekreślenie** - czy cena ma być przekreślona (Tak/Nie)
+- **Dopasuj rabat HikaShopa** - przy produktach z napisem procent albo kwota rabatu HikaShopa (opcja HikaShopa „Wyświetl zniżkę”) są liczone od najniższej ceny, a cena sprzed rabatu bez opisu jest ukryta (domyślnie Tak, patrz niżej)
 - **Margines górny/dolny** - marginesy elementu (np. 10px)
 
 Na listach produktów i w modułach napis jest mniejszy i zwykłej grubości, w kroju kwoty ceny, żeby nie dominował w małych kartach (np. w karuzeli w menu). Wygląd zmienisz w CSS szablonu klasą `.hikashop-omnibus-lowest-price--list`.
@@ -113,13 +117,30 @@ Okno kończy się w chwili wprowadzenia obniżki, a nie w dniu oglądania strony
 - **Zmiana wartości rabatu** (procent, kwota) to nowa obniżka: okno kończy się w chwili zmiany, także przy rabacie z datą rozpoczęcia.
 - **Rabat zmieniony z pominięciem HikaShopa** (np. wprost w bazie) albo włączony przed aktualizacją do 1.2.0: wtyczka zauważa go przy najbliższym przebiegu crona albo wyświetleniu produktu. Rabat z datą rozpoczęcia liczy się od tej daty, rabat bez daty od chwili zauważenia, więc dla takich rabatów ustaw datę rozpoczęcia.
 
+### Nowy towar
+
+Towar oferowany krócej niż 30 dni przed obniżką dostaje napis „Najniższa cena od wprowadzenia towaru” z najniższą ceną od początku sprzedaży (art. 4 ust. 3 ustawy, pkt III.3 wyjaśnień). Początek sprzedaży to data utworzenia produktu w HikaShopie, a gdy później zaczyna się sprzedaż („Początek sprzedaży” produktu), ta data. Import CSV nadpisuje datę utworzenia, więc wcześniejszy wpis w historii ma pierwszeństwo.
+
+Rabat obowiązujący od pierwszego dnia sprzedaży nie jest obniżką, tylko ceną wprowadzającą (UOKiK: cena „nadchodząca”, pkt III.3). Taki produkt napisu nie dostaje, a przy włączonym „Dopasuj rabat HikaShopa” wtyczka ukrywa też procent i cenę sprzed rabatu HikaShopa.
+
+### Rabat HikaShopa przy cenie
+
+HikaShop pokazuje (opcja „Wyświetl zniżkę”) procent albo kwotę rabatu i przekreśloną cenę sprzed rabatu, liczone od ceny regularnej. Według wyjaśnień UOKiK (pkt VI) wielkość obniżki liczy się od najniższej ceny z 30 dni, a przekreślona cena bez opisu sugeruje, że to cena odniesienia. Przy włączonym „Dopasuj rabat HikaShopa” (domyślnie) wtyczka przy produktach z napisem:
+
+- liczy procent albo kwotę rabatu od najniższej ceny (procent zaokrąglony w dół),
+- ukrywa przekreśloną cenę sprzed rabatu HikaShopa, bo cenę odniesienia z opisem pokazuje napis,
+- ukrywa procent, gdy cena nie jest niższa od najniższej.
+
+Przykład: produkt 100 zł był dwa tygodnie temu w promocji za 90 zł, teraz ma rabat −20% (80 zł). HikaShop pokazałby „−20%” i przekreślone 100 zł, wtyczka pokazuje „−11%” i napis z ceną 90 zł. Dopasowanie działa w przeglądarce (JavaScript) i obejmuje kartę produktu, listy, moduły i stronę koszyka.
+
 Opis ceny brzmi „Najniższa cena z 30 dni przed obniżką”. Prezes UOKiK ukarał sklep za opis „Najniższa cena przed obniżką”, bo nie wskazywał 30 dni (decyzja DIH-3.99.2024): opis musi jasno mówić, że chodzi o 30 dni przed wprowadzeniem obniżki. Treść napisu zmienisz nadpisaniem językowym klucza `PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_LABEL`.
 
 ## Ograniczenia
 
-- Na listach produktów i w modułach szablon ceny HikaShopa nie ma miejsca dla wtyczek. Napis trafia więc do miejsca `afterProductName` szablonu listy, a skrypt przenosi go tuż pod cenę produktu (bez JavaScriptu zostaje w `afterProductName`). Układy bez tego miejsca (np. `listing_img`) wymagają nadpisania szablonu. Lista albo moduł bez cen napisu nie dostaje. W koszyku informacji nie ma.
+- Na listach produktów i w modułach szablon ceny HikaShopa nie ma miejsca dla wtyczek. Napis trafia więc do miejsca `afterProductName` szablonu listy, a skrypt przenosi go tuż pod cenę produktu (bez JavaScriptu zostaje w `afterProductName`). Układy bez tego miejsca (np. `listing_img`) wymagają nadpisania szablonu. Lista albo moduł bez cen napisu nie dostaje.
+- Na stronie koszyka napis stoi pod ceną za sztukę. Moduł koszyka (mini koszyk) napisu nie dostaje, więc jeśli pokazuje rabat, ustaw w nim „Wyświetl zniżkę” na „Nie”.
 - Reaguje tylko na rabaty HikaShopa. Promocja ustawiona jako osobna cena z zakresem dat albo kupon w koszyku nie wyświetlą informacji (cena z zakresem dat trafia jednak do historii).
-- Produkt z wariantami: wariant bez własnej ceny korzysta z historii produktu głównego. Napis jest liczony dla wariantu pokazanego przy wejściu na kartę i nie zmienia się po wyborze innego wariantu, więc przy różnych cenach wariantów może nie pasować.
+- Produkt z wariantami: wariant bez własnej ceny korzysta z historii produktu głównego, wariant z własną ceną ma własną historię. Napis zmienia się po wyborze wariantu (zdarzenie HikaShopa `hkAfterUpdateVariant`), więc wymaga JavaScriptu.
 - Historia obejmuje ofertę dla wszystkich klientów. Rabaty i ceny tylko dla wybranych grup albo pojedynczych klientów do niej nie trafiają. UOKiK traktuje jednak cenę z promocji dla programu lojalnościowego jako punkt odniesienia dla kolejnych obniżek, więc przy takich promocjach sprawdź napis ręcznie.
 - Cena zmieniona z pominięciem HikaShopa (zapytanie SQL, zewnętrzna integracja zapisująca wprost do bazy) trafia do historii z datą najbliższego przebiegu crona albo wyświetlenia produktu, a nie z datą zmiany. Import CSV i akcje masowe HikaShopa wtyczka zapisuje od razu.
 - Ceny z okresu przed instalacją wtyczki nie są znane: punktem startowym jest cena regularna z dnia instalacji.
@@ -160,6 +181,13 @@ Paweł Półtoraczyk (pablop76)
 W razie problemów utwórz [Issue](../../issues) na GitHubie.
 
 ## Changelog
+
+### v1.4.0 (2026-11-22)
+
+- Nowość: towar oferowany krócej niż 30 dni przed obniżką dostaje napis „Najniższa cena od wprowadzenia towaru” z najniższą ceną od początku sprzedaży (art. 4 ust. 3 ustawy, pkt III.3); rabat od pierwszego dnia sprzedaży nie jest obniżką, więc napisu nie ma
+- Nowość: opcja „Dopasuj rabat HikaShopa” (domyślnie włączona): procent albo kwota rabatu HikaShopa liczone od najniższej ceny, przekreślona cena sprzed rabatu bez opisu ukryta, procent ukryty, gdy cena nie jest niższa od najniższej (pkt VI)
+- Nowość: napis na karcie produktu zmienia się po wyborze wariantu; wariant z własną ceną ma własną historię
+- Nowość: napis na stronie koszyka pod ceną za sztukę
 
 ### v1.3.1 (2026-11-21)
 
