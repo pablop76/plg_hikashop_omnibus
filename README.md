@@ -15,6 +15,7 @@ Plugin realizuje wymóg **dyrektywy Omnibus (UE) 2019/2161** w zakresie opisanym
 ✅ Procent albo kwota rabatu HikaShopa liczone od najniższej ceny, nie od ceny regularnej  
 ✅ Napis zmienia się po wyborze wariantu  
 ✅ Wyraźna prezentacja z przekreśloną najniższą ceną  
+✅ Opcjonalnie cena regularna z opisem, pokazana tak samo jak najniższa cena  
 
 ### Jak to działa?
 
@@ -33,6 +34,7 @@ Plugin realizuje wymóg **dyrektywy Omnibus (UE) 2019/2161** w zakresie opisanym
 - Rozmiar czcionki
 - Kolor tekstu
 - Przekreślenie ceny
+- Cena regularna z opisem (opcjonalnie)
 - Marginesy górny/dolny
 
 ✅ Wielojęzyczność (PL/EN)  
@@ -65,6 +67,7 @@ Dostępne opcje:
 - **Kolor tekstu** - kolor tekstu (#666666)
 - **Przekreślenie** - czy cena ma być przekreślona (Tak/Nie)
 - **Dopasuj rabat HikaShopa** - przy produktach z napisem procent albo kwota rabatu HikaShopa (opcja HikaShopa „Wyświetl zniżkę”) są liczone od najniższej ceny, a cena sprzed rabatu bez opisu jest ukryta (domyślnie Tak, patrz niżej)
+- **Pokaż cenę regularną** - nad najniższą ceną wiersz „Cena regularna: …” w tym samym wyglądzie (domyślnie Nie, tylko przy włączonym „Dopasuj rabat HikaShopa”, patrz niżej)
 - **Margines górny/dolny** - marginesy elementu (np. 10px)
 
 Na listach produktów i w modułach napis jest mniejszy i zwykłej grubości, w kroju kwoty ceny, żeby nie dominował w małych kartach (np. w karuzeli w menu). Wygląd zmienisz w CSS szablonu klasą `.hikashop-omnibus-lowest-price--list`.
@@ -136,11 +139,24 @@ Przykład: produkt 100 zł był dwa tygodnie temu w promocji za 90 zł, teraz ma
 
 Wtyczka zmienia tylko prezentację rabatu. Cena sprzedaży, czyli ile klient płaci, zostaje taka, jak policzył ją HikaShop.
 
+Przy wyłączonej opcji wtyczka nie zmienia rabatu HikaShopa. Rabat od pierwszego dnia sprzedaży zostaje wtedy z przekreśloną ceną, której towar nigdy nie miał, i bez napisu, więc takiego rabatu nie ustawiaj albo włącz opcję.
+
+### Cena regularna
+
+Wyjaśnienia UOKiK (pkt VI.2, VI.4, VI.9) pozwalają pokazać obok ceny sprzedaży i najniższej ceny z 30 dni trzecią cenę, na przykład regularną, jeśli:
+
+- jest podpisana („Cena regularna”), bo sama przekreślona cena nie mówi, czym jest,
+- jest pokazana tak samo jak najniższa cena: ta sama czcionka (wielkość, krój, kolor), a przekreślona tylko wtedy, gdy najniższa też jest przekreślona,
+- procent albo kwota rabatu nadal liczą się od najniższej ceny (od ceny regularnej najwyżej dodatkowo, w ten sam sposób),
+- kolejność cen jest taka sama w całym sklepie.
+
+Opcja **Pokaż cenę regularną** (domyślnie Nie, dostępna przy włączonym „Dopasuj rabat HikaShopa”) dodaje w bloku napisu, nad najniższą ceną, wiersz „Cena regularna: 100,00 zł” z ceną sprzed rabatu HikaShopa, z podatkiem tak jak najniższa cena. Wiersz ma wygląd napisu, więc zawsze wygląda tak samo jak najniższa cena, i stoi w tym samym miejscu na karcie produktu, listach, w modułach i na stronie koszyka. Zmienia się razem z wariantem. Przy cenie wprowadzającej (rabat od pierwszego dnia sprzedaży) i w module koszyka ceny regularnej nie ma, tak jak napisu. Treść podpisu zmienisz nadpisaniem językowym klucza `PLG_HIKASHOP_OMNIBUS_REGULAR_PRICE_LABEL`.
+
+Przykład: produkt 100 zł był dwa tygodnie temu w promocji za 90 zł, teraz kosztuje 80 zł. Przy cenie widać „Cena regularna: 100,00 zł”, pod nią „Najniższa cena z 30 dni przed obniżką: 90,00 zł”, a rabat HikaShopa to „−11%”.
+
 ### VAT
 
 Historia trzyma cenę netto, cenę brutto i stawkę VAT z chwili zapisu. Napis pokazuje cenę brutto, którą klient wtedy płacił, więc zmiana stawki VAT nie przelicza starszych cen. Wpisy sprzed 1.4.0 mają tylko cenę netto: przy pierwszym zapisie produktu po aktualizacji dostają cenę brutto według stawki obowiązującej w tym momencie (wcześniejszej stawki wtyczka nie zna) i potem już się nie zmieniają.
-
-Przy wyłączonej opcji wtyczka nie zmienia rabatu HikaShopa. Rabat od pierwszego dnia sprzedaży zostaje wtedy z przekreśloną ceną, której towar nigdy nie miał, i bez napisu, więc takiego rabatu nie ustawiaj albo włącz opcję.
 
 Opis ceny brzmi „Najniższa cena z 30 dni przed obniżką”. Prezes UOKiK ukarał sklep za opis „Najniższa cena przed obniżką”, bo nie wskazywał 30 dni (decyzja DIH-3.99.2024): opis musi jasno mówić, że chodzi o 30 dni przed wprowadzeniem obniżki. Treść napisu zmienisz nadpisaniem językowym klucza `PLG_HIKASHOP_OMNIBUS_LOWEST_PRICE_LABEL`.
 
@@ -191,6 +207,10 @@ Paweł Półtoraczyk (pablop76)
 W razie problemów utwórz [Issue](../../issues) na GitHubie.
 
 ## Changelog
+
+### v1.5.0 (2026-11-22)
+
+- Nowość: opcja „Pokaż cenę regularną” (domyślnie wyłączona, działa przy „Dopasuj rabat HikaShopa”): nad najniższą ceną wiersz „Cena regularna: …” w tym samym wyglądzie co najniższa cena (czcionka, kolor, przekreślenie), na karcie produktu, listach, w modułach i na stronie koszyka, zmieniany razem z wariantem; przy cenie wprowadzającej go nie ma (wyjaśnienia UOKiK pkt VI.2, VI.4, VI.9)
 
 ### v1.4.0 (2026-11-22)
 

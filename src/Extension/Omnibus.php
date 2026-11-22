@@ -1578,7 +1578,7 @@ JS;
             if ($offered >= $dateEnd) {
                 // Bez napisu, ale z dopasowaniem rabatu HikaShop nie pokaże tu oznak obniżki
                 return (int)$this->params->get('adjust_discount', 1)
-                    ? ['label' => '', 'value' => '', 'saving' => '']
+                    ? ['label' => '', 'value' => '', 'saving' => '', 'regular' => null]
                     : null;
             }
             if ($offered > $dateLimit) {
@@ -1599,13 +1599,25 @@ JS;
         }
 
         $currencyHelper = hikashop_get('class.currency');
+        $adjust = (int)$this->params->get('adjust_discount', 1);
+
+        // Trzecia cena (UOKiK pkt VI.2, VI.4): tylko podpisana i w wyglądzie napisu, więc tylko
+        // przy dopasowaniu, które chowa niepodpisaną cenę HikaShopa i liczy procent od najniższej
+        $regular = null;
+        if ($adjust && (int)$this->params->get('show_regular', 0)) {
+            $regular = $currencyHelper->format(
+                (float)($priceObj->price_value_without_discount_with_tax ?? (float)$priceObj->price_value_without_discount * $ratio),
+                $currencyId
+            );
+        }
 
         return [
             'label' => $label,
             'value' => $currencyHelper->format($lowestShown, $currencyId),
-            'saving' => (int)$this->params->get('adjust_discount', 1)
+            'saving' => $adjust
                 ? $this->savingText($lowestShown, $currentShown, $discount, $currencyId, $currencyHelper)
                 : null,
+            'regular' => $regular,
         ];
     }
 
@@ -1685,7 +1697,14 @@ JS;
             return $html . ' hidden></div>';
         }
 
-        return $html . '>
+        // Cena regularna nad najniższą, w tym samym bloku: ta sama czcionka i przekreślenie,
+        // ta sama kolejność na karcie, listach i w koszyku
+        $regular = empty($info['regular']) ? '' : '
+            <div class="omnibus-regular-price"><span class="omnibus-price-label">'
+            . Text::_('PLG_HIKASHOP_OMNIBUS_REGULAR_PRICE_LABEL') . ': </span><span class="omnibus-price-value">'
+            . $info['regular'] . '</span></div>';
+
+        return $html . '>' . $regular . '
             <span class="omnibus-price-label">' . $info['label'] . ': </span>
             <span class="omnibus-price-value">' . $info['value'] . '</span>
         </div>';
